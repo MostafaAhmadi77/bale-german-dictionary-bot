@@ -1,0 +1,1 @@
+{"description":"ربات بله — دیکشنری آلمانی به فارسی با جعبه لایتنر (Bale German→Persian dictionary bot with Leitner box)","engines":{"node":">=18"},"license":"MIT","name":"bale-german-dictionary-bot","scripts":{"dev:info":"node -e \"console.log('Serverless project — deploy on Vercel. Local test: npm test')\"","test":"node scripts/test-local.mjs"},"type":"module","version":"1.0.0"}
