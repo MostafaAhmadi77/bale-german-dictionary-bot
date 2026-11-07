@@ -56,7 +56,7 @@ async function getImageBuffer(entry, conceptOverride) {
       const buf = await downloadImageBuffer(entry.image);
       if (buf) return buf;
     }
-    return await generateImageBuffer(entry.word, conceptOverride || entry.english);
+    return await generateImageBuffer(entry.word, conceptOverride || entry.english, entry.wordType);
   } catch (err) {
     console.error('image error:', err);
     return null;
