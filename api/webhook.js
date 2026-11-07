@@ -3,13 +3,13 @@
 // امکانات: دیکشنری آلمانی→فارسی و فارسی→آلمانی، تصویر هر کلمه، تلفظ صوتی، جعبه‌ی لایتنر، منوی دکمه‌ای.
 
 import {
-  sendMessage, answerCallbackQuery, inlineKeyboard, btn, urlBtn, replyKeyboard,
+  sendMessage, sendAudioBuffer, answerCallbackQuery, inlineKeyboard, btn, replyKeyboard,
   sendPhotoBuffer,
 } from '../lib/bale.js';
 import {
   lookupGerman, formatEntry, lookupPersian, formatPersianResult, pluralText,
 } from '../lib/dictionary.js';
-import { generateImageBuffer, downloadImageBuffer, fetchCommonsPhotoUrl, fetchPixabayPhotoUrl } from '../lib/media.js';
+import { generateImageBuffer, downloadImageBuffer, fetchCommonsPhotoUrl, fetchPixabayPhotoUrl, fetchTTSMp3 } from '../lib/media.js';
 import { translateText, detectDirection, MAX_TEXT_CHARS } from '../lib/translate.js';
 import { applyReview } from '../lib/ai-check.js';
 import {
@@ -62,9 +62,12 @@ const pendingKey = (userId) => `pending:${userId}`;
 
 // ----- پیام واحد: عکس + متن در کپشن + دکمه‌ها (بدون پیام‌های جدا) -----
 const CAPTION_LIMIT = 1000; // سقف امن کپشن عکس
-const TTS_BASE = 'https://bale-german-dictionary-bot.vercel.app/api/tts?t=';
-const ttsUrl = (speakText) => TTS_BASE + encodeURIComponent(speakText);
 const speakOf = (e) => (e.article ? `${e.article} ${e.word}` : e.word);
+// تلفظ داخل خود چت پخش می‌شود (بدون باز شدن هیچ سایتی): دکمه کال‌بک است و ربات
+// فایل صدا را همان‌جا می‌فرستد. داده‌ی کال‌بک سقف ۶۴ بایت دارد؛ برای عبارت‌های
+// خیلی بلند فقط پیشوند می‌رود و عبارت از آخرین مدخل خوانده می‌شود.
+const ttsData = (prefix, phrase) =>
+  (Buffer.byteLength(`${prefix}${phrase}`, 'utf8') <= 60 ? `${prefix}${phrase}` : prefix.slice(0, -1));
 
 /** تصویر کلمه با نوع منبعش: {buf, kind} — kind برای حکم بازبینی AI لازم است */
 async function getImageBuffer(entry, conceptOverride) {
@@ -286,10 +289,10 @@ async function handleGermanLookup(chatId, userId, text) {
     await kv.setJSON(`dict:v7:${entry.word.toLowerCase()}`, entry).catch(() => {});
   }
   await kv.setJSON(lastKey(userId), entry);
-  // یک پیام واحد: عکس + متن کامل در کپشن + دکمه‌ی لایتنر و دکمه‌ی تلفظ (لینک پخش‌کننده)
+  // یک پیام واحد: عکس + متن کامل در کپشن + دکمه‌ی لایتنر و دکمه‌ی تلفظ (پخش داخل چت)
   const keyboard = inlineKeyboard([[
     btn('📦 افزودن به لایتنر', 'leitner:add'),
-    urlBtn('🔊 تلفظ', ttsUrl(speakOf(entry))),
+    btn('🔊 تلفظ', ttsData('tts:', speakOf(entry))),
   ]]);
   await sendEntryMessage(chatId, entry, formatEntry(entry), keyboard, img);
 }
@@ -330,7 +333,7 @@ async function handlePersianLookup(chatId, userId, text) {
   const rows = result.equivalents.map((eq, i) => {
     const e = eq.entry || { word: eq.de };
     return [
-      urlBtn(`🔊 ${eq.de}`, ttsUrl(speakOf(e))),
+      btn(`🔊 ${eq.de}`, ttsData('tts:', speakOf(e))),
       btn(`📦 ${eq.de}`, `faadd:${i}`),
     ];
   });
@@ -433,6 +436,25 @@ async function askInterval(chatId, userId, entry) {
   );
 }
 
+// تلفظ داخل چت: فایل صدا همان‌جا در گفت‌وگو فرستاده می‌شود و کاربر از بله خارج نمی‌شود.
+// روی صدای عادی دکمه‌ی «🐌 تلفظ آهسته» هم می‌آید.
+async function handleTts(chatId, userId, phrase, slow) {
+  let text = (phrase || '').trim();
+  if (!text) {
+    const last = await kv.getJSON(lastKey(userId)).catch(() => null);
+    if (last) text = speakOf(last);
+  }
+  if (!text) { await sendMessage(chatId, 'اول یک کلمه جست‌وجو کن، بعد تلفظش را بشنو.'); return; }
+  const buf = await fetchTTSMp3(text, slow).catch(() => null);
+  if (!buf) { await sendMessage(chatId, 'تلفظ الان در دسترس نیست؛ دوباره امتحان کن. 🙏'); return; }
+  if (slow) {
+    await sendAudioBuffer(chatId, buf, `🐌 تلفظ آهسته: ${text}`, text);
+  } else {
+    await sendAudioBuffer(chatId, buf, `🔊 تلفظ: ${text}`, text,
+      inlineKeyboard([[btn('🐌 تلفظ آهسته', ttsData('ttss:', text))]]));
+  }
+}
+
 async function handleCallback(cb) {
   const chatId = cb.message?.chat?.id;
   const userId = cb.from?.id ?? chatId;
@@ -440,6 +462,8 @@ async function handleCallback(cb) {
   await answerCallbackQuery(cb.id);
   if (!chatId) return;
 
+  if (data === 'tts' || data.startsWith('tts:')) { await handleTts(chatId, userId, data.slice(4), false); return; }
+  if (data === 'ttss' || data.startsWith('ttss:')) { await handleTts(chatId, userId, data.slice(5), true); return; }
   if (data === 'cron:review') { await startReview(chatId, userId); return; }
 
   if (data.startsWith('fbreply:')) {
