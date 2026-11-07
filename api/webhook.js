@@ -43,12 +43,12 @@ const lastKey = (userId) => `last:${userId}`;      // آخرین مدخل آلم
 const lastFaKey = (userId) => `lastfa:${userId}`;  // آخرین معادل‌های فارسی→آلمانی
 const pendingKey = (userId) => `pending:${userId}`;
 
-/** ارسال تصویر کلمه: اول عکس واقعی ویکی‌واژه، وگرنه تصویر ساخته‌شده با AI */
-async function sendWordImage(chatId, entry) {
+/** ارسال تصویر کلمه: اول عکس واقعی ویکی‌واژه، وگرنه تصویر ساخته‌شده با AI از روی مفهوم درست */
+async function sendWordImage(chatId, entry, conceptOverride) {
   try {
     let buf = null;
     if (entry.image) buf = await downloadImageBuffer(entry.image);
-    if (!buf) buf = await generateImageBuffer(entry.word, entry.english);
+    if (!buf) buf = await generateImageBuffer(entry.word, conceptOverride || entry.english);
     if (buf) {
       await sendPhotoBuffer(chatId, buf,
         `🖼 ${entry.article ? entry.article + ' ' : ''}${entry.word}${entry.persian ? ` — ${entry.persian}` : ''}`);
@@ -133,8 +133,10 @@ async function handlePersianLookup(chatId, userId, text) {
   ]);
   await sendMessage(chatId, formatPersianResult(result), inlineKeyboard(rows));
   await kv.setJSON(lastFaKey(userId), result.equivalents.map((eq) => eq.entry || { word: eq.de }));
-  const first = result.equivalents[0]?.entry;
-  if (first) await sendWordImage(chatId, first);
+  // تصویر: اول معادلی که عکس واقعی دارد؛ وگرنه ساخت تصویر از مفهوم انگلیسیِ خود کلمه‌ی فارسی
+  const withImage = result.equivalents.find((eq) => eq.entry?.image)?.entry;
+  const first = withImage || result.equivalents[0]?.entry;
+  if (first) await sendWordImage(chatId, first, result.englishConcept);
 }
 
 async function handleMessage(msg) {
