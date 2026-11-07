@@ -10,6 +10,7 @@ import {
   lookupGerman, formatEntry, lookupPersian, formatPersianResult, pluralText,
 } from '../lib/dictionary.js';
 import { generateImageBuffer, downloadImageBuffer, fetchCommonsPhotoUrl } from '../lib/media.js';
+import { translateText, detectDirection, MAX_TEXT_CHARS } from '../lib/translate.js';
 import { kv } from '../lib/store.js';
 import {
   addCard, getCard, listCards, dueCards, answerCard, removeCard, MAX_BOX,
@@ -26,6 +27,8 @@ const HELP = `🇩🇪 دیکشنری آلمانی ⇄ فارسی
 📦 جعبه لایتنر — کلمه‌های ذخیره‌شده به ترتیب
 🔁 مرور کلمات — مرور رسیده‌ها
 🌐 تغییر زبان — جابه‌جایی بین «آلمانی ← فارسی» و «فارسی ← آلمانی»
+📝 ترجمه متن — ترجمه‌ی جمله و پاراگراف (جهت خودکار تشخیص داده می‌شود)
+نکته: اگر در هر حالتی جمله بفرستید (۴ کلمه یا بیشتر)، خودش به‌صورت متن ترجمه می‌شود.
 
 در حالت فارسی ← آلمانی، همه‌ی معادل‌های آلمانی کلمه به ترتیب رواج نوشته می‌شوند.`;
 
@@ -36,7 +39,8 @@ const setMode = (userId, m) => kv.setJSON(modeKey(userId), m);
 
 const menuKeyboard = (mode) => replyKeyboard([
   ['📦 جعبه لایتنر', '🔁 مرور کلمات'],
-  [mode === 'de' ? '🌐 ترجمه فارسی به آلمانی' : '🌐 ترجمه آلمانی به فارسی'],
+  [mode === 'fa' ? '🌐 ترجمه آلمانی به فارسی' : '🌐 ترجمه فارسی به آلمانی'],
+  ['📝 ترجمه متن'],
 ]);
 
 const lastKey = (userId) => `last:${userId}`;      // آخرین مدخل آلمانی (برای لایتنر/تلفظ)
@@ -135,7 +139,7 @@ async function showBox(chatId, userId) {
 
 async function toggleMode(chatId, userId) {
   const cur = await getMode(userId);
-  const next = cur === 'de' ? 'fa' : 'de';
+  const next = cur === 'de' ? 'fa' : 'de'; // از حالت متن هم به دیکشنری آلمانی برمی‌گردد
   await setMode(userId, next);
   await sendMessage(
     chatId,
@@ -144,6 +148,26 @@ async function toggleMode(chatId, userId) {
       : '🌐 حالت عوض شد: حالا کلمه‌ی آلمانی بفرستید، معنی فارسی + تصویر + تلفظ می‌گیرید.',
     menuKeyboard(next),
   );
+}
+
+/** ترجمه‌ی متن (جمله/پاراگراف) با تشخیص خودکار جهت */
+async function handleTextTranslation(chatId, text) {
+  if (text.length > MAX_TEXT_CHARS) {
+    await sendMessage(chatId, `⚠️ متن طولانی است؛ حداکثر ${MAX_TEXT_CHARS} نویسه در هر پیام ترجمه می‌شود. متن را تکه‌تکه بفرستید.`);
+    return;
+  }
+  const [from, to] = detectDirection(text);
+  const r = await translateText(text, from, to);
+  if (r.failed || !r.text) {
+    await sendMessage(chatId, '⚠️ سرویس ترجمه در حال حاضر در دسترس نیست. چند دقیقه دیگر دوباره تلاش کنید.');
+    return;
+  }
+  const header = from === 'de' ? '📝 ترجمه 🇩🇪 → 🇮🇷' : '📝 ترجمه 🇮🇷 → 🇩🇪';
+  const body = `${header}\n\n${r.text}`;
+  // پیام‌های خیلی بلند در چند بخش (سقف امن پیام بله)
+  for (let i = 0; i < body.length; i += 3500) {
+    await sendMessage(chatId, body.slice(i, i + 3500));
+  }
 }
 
 async function handleGermanLookup(chatId, userId, text) {
@@ -230,6 +254,15 @@ async function handleMessage(msg) {
   if (text === '📦 جعبه لایتنر' || text === '/mywords') { await showBox(chatId, userId); return; }
   if (text === '🔁 مرور کلمات' || text === '/review') { await startReview(chatId, userId); return; }
   if (text.startsWith('🌐')) { await toggleMode(chatId, userId); return; }
+  if (text === '📝 ترجمه متن' || text === '/text') {
+    await setMode(userId, 'text');
+    await sendMessage(
+      chatId,
+      '📝 حالت ترجمه‌ی متن فعال شد.\nجمله یا پاراگراف بفرستید — آلمانی باشد به فارسی و فارسی باشد به آلمانی ترجمه می‌شود (تشخیص خودکار).\nبرای برگشتن به دیکشنری، دکمه‌ی 🌐 را بزنید.',
+      menuKeyboard('text'),
+    );
+    return;
+  }
 
   if (text === '/lang') { await toggleMode(chatId, userId); return; }
   if (text === '/due') {
@@ -245,6 +278,11 @@ async function handleMessage(msg) {
   }
 
   const mode = await getMode(userId);
+  // حالت متن، یا جمله‌ی کامل در هر حالت (۴ کلمه به بالا) → ترجمه‌ی متن
+  if (mode === 'text' || text.split(/\s+/).length >= 4) {
+    await handleTextTranslation(chatId, text);
+    return;
+  }
   if (mode === 'fa') await handlePersianLookup(chatId, userId, text);
   else await handleGermanLookup(chatId, userId, text);
 }
