@@ -9,7 +9,7 @@ import {
 import {
   lookupGerman, formatEntry, lookupPersian, formatPersianResult, pluralText,
 } from '../lib/dictionary.js';
-import { generateImageBuffer, downloadImageBuffer, fetchCommonsPhotoUrl } from '../lib/media.js';
+import { generateImageBuffer, downloadImageBuffer, fetchCommonsPhotoUrl, fetchPixabayPhotoUrl } from '../lib/media.js';
 import { translateText, detectDirection, MAX_TEXT_CHARS } from '../lib/translate.js';
 import { kv } from '../lib/store.js';
 import {
@@ -67,6 +67,12 @@ async function getImageBuffer(entry, conceptOverride) {
         const buf = await downloadImageBuffer(url);
         if (buf) return buf;
       }
+    }
+    // عکس استوک Pixabay — برای همه‌ی نوع‌ها، مخصوصا فعل‌ها و صحنه‌ها (اگر کلید فعال باشد)
+    const pixUrl = await fetchPixabayPhotoUrl(conceptOverride || entry.english);
+    if (pixUrl) {
+      const buf = await downloadImageBuffer(pixUrl);
+      if (buf) return buf;
     }
     return await generateImageBuffer(entry.word, conceptOverride || entry.english, entry.wordType);
   } catch (err) {
