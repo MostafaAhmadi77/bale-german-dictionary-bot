@@ -9,7 +9,7 @@ import {
 import {
   lookupGerman, formatEntry, lookupPersian, formatPersianResult, pluralText,
 } from '../lib/dictionary.js';
-import { generateImageBuffer, downloadImageBuffer } from '../lib/media.js';
+import { generateImageBuffer, downloadImageBuffer, fetchCommonsPhotoUrl } from '../lib/media.js';
 import { kv } from '../lib/store.js';
 import {
   addCard, getCard, listCards, dueCards, answerCard, removeCard, MAX_BOX,
@@ -56,6 +56,14 @@ async function getImageBuffer(entry, conceptOverride) {
       const buf = await downloadImageBuffer(entry.image);
       if (buf) return buf;
     }
+    // دقت تصویر: برای اسم‌ها اول عکس واقعی از کامنز (با کنترل عنوان فایل)
+    if (!entry.wordType || entry.wordType === 'Substantiv') {
+      const url = await fetchCommonsPhotoUrl(conceptOverride || entry.english);
+      if (url) {
+        const buf = await downloadImageBuffer(url);
+        if (buf) return buf;
+      }
+    }
     return await generateImageBuffer(entry.word, conceptOverride || entry.english, entry.wordType);
   } catch (err) {
     console.error('image error:', err);
@@ -75,15 +83,21 @@ function formatEntryCompact(e) {
   return lines.join('\n');
 }
 
-/** یک پیام واحد می‌فرستد: عکس با کپشنِ متن و دکمه‌ها؛ اگر عکس نبود، پیام متنی */
+/**
+ * ارسال نتیجه: متن کامل همیشه می‌رسد (تمامی معانی).
+ * اگر متن در کپشن جا شد: یک پیام واحد (عکس+متن+دکمه). اگر نشد: پیام متنی کامل + عکس جدا با دکمه‌ها.
+ */
 async function sendEntryMessage(chatId, entry, text, keyboard) {
   const buf = await getImageBuffer(entry);
-  if (buf) {
-    const caption = text.length <= CAPTION_LIMIT ? text : formatEntryCompact(entry);
-    const r = await sendPhotoBuffer(chatId, buf, caption, keyboard);
+  if (buf && text.length <= CAPTION_LIMIT) {
+    const r = await sendPhotoBuffer(chatId, buf, text, keyboard);
     if (r?.ok) return;
   }
-  await sendMessage(chatId, text, keyboard);
+  await sendMessage(chatId, text, buf ? undefined : keyboard);
+  if (buf) {
+    await sendPhotoBuffer(chatId, buf,
+      `🖼 ${entry.article ? entry.article + ' ' : ''}${entry.word}`, keyboard);
+  }
 }
 
 async function startReview(chatId, userId) {
@@ -180,18 +194,19 @@ async function handlePersianLookup(chatId, userId, text) {
   });
   const keyboard = inlineKeyboard(rows);
 
-  // تصویرِ معادلی که عکس واقعی دارد (وگرنه معادل اول) — همه داخل همان یک پیام
+  // تصویرِ معادلی که عکس واقعی دارد (وگرنه معادل اول) — متن کامل همیشه می‌رسد
   const withImage = result.equivalents.find((eq) => eq.entry?.image)?.entry;
   const first = withImage || result.equivalents[0]?.entry;
-  if (first) {
-    const buf = await getImageBuffer(first, result.englishConcept);
-    if (buf) {
-      const caption = fullText.length <= CAPTION_LIMIT ? fullText : formatPersianResult(result);
-      const r = await sendPhotoBuffer(chatId, buf, caption.slice(0, CAPTION_LIMIT), keyboard);
-      if (r?.ok) return;
-    }
+  const buf = first ? await getImageBuffer(first, result.englishConcept) : null;
+  if (buf && fullText.length <= CAPTION_LIMIT) {
+    const r = await sendPhotoBuffer(chatId, buf, fullText, keyboard);
+    if (r?.ok) return;
   }
-  await sendMessage(chatId, fullText, keyboard);
+  await sendMessage(chatId, fullText, buf ? undefined : keyboard);
+  if (buf && first) {
+    await sendPhotoBuffer(chatId, buf,
+      `🖼 ${first.article ? first.article + ' ' : ''}${first.word}`, keyboard);
+  }
 }
 
 async function handleMessage(msg) {
