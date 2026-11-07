@@ -3,13 +3,13 @@
 // امکانات: دیکشنری آلمانی→فارسی و فارسی→آلمانی، تصویر هر کلمه، تلفظ صوتی، جعبه‌ی لایتنر، منوی دکمه‌ای.
 
 import {
-  sendMessage, answerCallbackQuery, inlineKeyboard, btn, replyKeyboard,
-  sendPhotoBuffer, sendAudioBuffer,
+  sendMessage, answerCallbackQuery, inlineKeyboard, btn, urlBtn, replyKeyboard,
+  sendPhotoBuffer,
 } from '../lib/bale.js';
 import {
-  lookupGerman, formatEntry, lookupPersian, formatPersianResult,
+  lookupGerman, formatEntry, lookupPersian, formatPersianResult, pluralText,
 } from '../lib/dictionary.js';
-import { generateImageBuffer, downloadImageBuffer, fetchTTSMp3 } from '../lib/media.js';
+import { generateImageBuffer, downloadImageBuffer } from '../lib/media.js';
 import { kv } from '../lib/store.js';
 import {
   addCard, getCard, listCards, dueCards, answerCard, removeCard, MAX_BOX,
@@ -20,7 +20,7 @@ const HELP = `🇩🇪 دیکشنری آلمانی ⇄ فارسی
 کلمه بفرستید و بگیرید:
 • آرتیکل (der / die / das) و حالت جمع
 • توضیح به آلمانی + معنی فارسی
-• 🖼 تصویر کلمه و دکمه‌ی 🔊 تلفظ (عادی و آهسته)
+• 🖼 تصویر کلمه — همه در یک پیام، با دکمه‌ی 🔊 تلفظ (عادی و آهسته)
 
 از منوی پایین استفاده کنید:
 📦 جعبه لایتنر — کلمه‌های ذخیره‌شده به ترتیب
@@ -43,19 +43,46 @@ const lastKey = (userId) => `last:${userId}`;      // آخرین مدخل آلم
 const lastFaKey = (userId) => `lastfa:${userId}`;  // آخرین معادل‌های فارسی→آلمانی
 const pendingKey = (userId) => `pending:${userId}`;
 
-/** ارسال تصویر کلمه: اول عکس واقعی ویکی‌واژه، وگرنه تصویر ساخته‌شده با AI از روی مفهوم درست */
-async function sendWordImage(chatId, entry, conceptOverride) {
+// ----- پیام واحد: عکس + متن در کپشن + دکمه‌ها (بدون پیام‌های جدا) -----
+const CAPTION_LIMIT = 1000; // سقف امن کپشن عکس
+const TTS_BASE = 'https://bale-german-dictionary-bot.vercel.app/api/tts?t=';
+const ttsUrl = (speakText) => TTS_BASE + encodeURIComponent(speakText);
+const speakOf = (e) => (e.article ? `${e.article} ${e.word}` : e.word);
+
+/** بایت تصویر کلمه: اول عکس واقعی ویکی‌واژه، وگرنه تصویر ساخته‌شده از مفهوم درست */
+async function getImageBuffer(entry, conceptOverride) {
   try {
-    let buf = null;
-    if (entry.image) buf = await downloadImageBuffer(entry.image);
-    if (!buf) buf = await generateImageBuffer(entry.word, conceptOverride || entry.english);
-    if (buf) {
-      await sendPhotoBuffer(chatId, buf,
-        `🖼 ${entry.article ? entry.article + ' ' : ''}${entry.word}${entry.persian ? ` — ${entry.persian}` : ''}`);
+    if (entry.image) {
+      const buf = await downloadImageBuffer(entry.image);
+      if (buf) return buf;
     }
+    return await generateImageBuffer(entry.word, conceptOverride || entry.english);
   } catch (err) {
     console.error('image error:', err);
+    return null;
   }
+}
+
+/** نسخه‌ی فشرده‌ی مدخل برای وقتی متن کامل در کپشن جا نمی‌شود */
+function formatEntryCompact(e) {
+  const lines = [`🇩🇪 ${e.article ? e.article + ' ' : ''}${e.word}`];
+  if (e.phonetic) lines.push(`🔊 ${e.phonetic}`);
+  if (e.wordType === 'Substantiv') lines.push(`🔤 جمع: ${pluralText(e) || '—'}`);
+  else if (e.wordType) lines.push(`🏷 نوع کلمه: ${e.wordType}`);
+  if (e.definitions?.length) lines.push('', `📖 ${e.definitions[0]}`);
+  if (e.persian) lines.push('', `🇮🇷 معنی فارسی: ${e.persian}`);
+  return lines.join('\n');
+}
+
+/** یک پیام واحد می‌فرستد: عکس با کپشنِ متن و دکمه‌ها؛ اگر عکس نبود، پیام متنی */
+async function sendEntryMessage(chatId, entry, text, keyboard) {
+  const buf = await getImageBuffer(entry);
+  if (buf) {
+    const caption = text.length <= CAPTION_LIMIT ? text : formatEntryCompact(entry);
+    const r = await sendPhotoBuffer(chatId, buf, caption, keyboard);
+    if (r?.ok) return;
+  }
+  await sendMessage(chatId, text, keyboard);
 }
 
 async function startReview(chatId, userId) {
@@ -106,19 +133,17 @@ async function toggleMode(chatId, userId) {
 
 async function handleGermanLookup(chatId, userId, text) {
   const entry = await lookupGerman(text);
-  await sendMessage(
-    chatId,
-    formatEntry(entry),
-    entry.found
-      ? inlineKeyboard([
-          [btn('📦 افزودن به لایتنر', 'leitner:add'), btn('🔊 تلفظ', 'tts')],
-        ])
-      : undefined,
-  );
-  if (entry.found) {
-    await kv.setJSON(lastKey(userId), entry);
-    await sendWordImage(chatId, entry); // تصویر بعد از متن
+  if (!entry.found) {
+    await sendMessage(chatId, formatEntry(entry));
+    return;
   }
+  await kv.setJSON(lastKey(userId), entry);
+  // یک پیام واحد: عکس + متن کامل در کپشن + دکمه‌ی لایتنر و دکمه‌ی تلفظ (لینک پخش‌کننده)
+  const keyboard = inlineKeyboard([[
+    btn('📦 افزودن به لایتنر', 'leitner:add'),
+    urlBtn('🔊 تلفظ', ttsUrl(speakOf(entry))),
+  ]]);
+  await sendEntryMessage(chatId, entry, formatEntry(entry), keyboard);
 }
 
 async function handlePersianLookup(chatId, userId, text) {
@@ -127,16 +152,45 @@ async function handlePersianLookup(chatId, userId, text) {
     await sendMessage(chatId, formatPersianResult(result));
     return;
   }
-  // برای هر معادل یک دکمه‌ی افزودن به لایتنر
-  const rows = result.equivalents.map((eq, i) => [
-    btn(`📦 افزودن «${eq.de}» به لایتنر`, `faadd:${i}`),
-  ]);
-  await sendMessage(chatId, formatPersianResult(result), inlineKeyboard(rows));
   await kv.setJSON(lastFaKey(userId), result.equivalents.map((eq) => eq.entry || { word: eq.de }));
-  // تصویر: اول معادلی که عکس واقعی دارد؛ وگرنه ساخت تصویر از مفهوم انگلیسیِ خود کلمه‌ی فارسی
+
+  // همان امکانات جهت برعکس: برای هر معادل آرتیکل+جمع+معنی، دکمه‌ی تلفظ و لایتنر
+  const lines = [`🇮🇷 ${result.word}`, '', '🇩🇪 معادل‌های آلمانی (به ترتیب رواج):'];
+  result.equivalents.forEach((eq, i) => {
+    const e = eq.entry;
+    let line = `\n${i + 1}. ${e?.article ? e.article + ' ' : ''}${eq.de}`;
+    const pl = pluralText(e);
+    if (pl) line += ` — جمع: ${pl}`;
+    if (e?.persian) line += ` (${e.persian})`;
+    lines.push(line);
+    // معادل اول توضیح آلمانی هم می‌گیرد — مثل جهت برعکس
+    if (i === 0 && e?.definitions?.length) {
+      lines.push(`📖 ${e.definitions.slice(0, 2).join('؛ ')}`);
+    }
+  });
+  const fullText = lines.join('\n');
+
+  const rows = result.equivalents.map((eq, i) => {
+    const e = eq.entry || { word: eq.de };
+    return [
+      urlBtn(`🔊 ${eq.de}`, ttsUrl(speakOf(e))),
+      btn(`📦 ${eq.de}`, `faadd:${i}`),
+    ];
+  });
+  const keyboard = inlineKeyboard(rows);
+
+  // تصویرِ معادلی که عکس واقعی دارد (وگرنه معادل اول) — همه داخل همان یک پیام
   const withImage = result.equivalents.find((eq) => eq.entry?.image)?.entry;
   const first = withImage || result.equivalents[0]?.entry;
-  if (first) await sendWordImage(chatId, first, result.englishConcept);
+  if (first) {
+    const buf = await getImageBuffer(first, result.englishConcept);
+    if (buf) {
+      const caption = fullText.length <= CAPTION_LIMIT ? fullText : formatPersianResult(result);
+      const r = await sendPhotoBuffer(chatId, buf, caption.slice(0, CAPTION_LIMIT), keyboard);
+      if (r?.ok) return;
+    }
+  }
+  await sendMessage(chatId, fullText, keyboard);
 }
 
 async function handleMessage(msg) {
@@ -192,23 +246,6 @@ async function askInterval(chatId, userId, entry) {
   );
 }
 
-async function sendPronunciation(chatId, userId) {
-  const entry = await kv.getJSON(lastKey(userId));
-  if (!entry) { await sendMessage(chatId, 'اول یک کلمه‌ی آلمانی جست‌وجو کن.'); return; }
-  const label = `${entry.article ? entry.article + ' ' : ''}${entry.word}`;
-  const speakText = entry.article ? `${entry.article} ${entry.word}` : entry.word;
-  const [normal, slow] = await Promise.all([
-    fetchTTSMp3(speakText, false),
-    fetchTTSMp3(speakText, true),
-  ]);
-  if (!normal && !slow) {
-    await sendMessage(chatId, '⚠️ تلفظ الان در دسترس نیست. دوباره تلاش کن.');
-    return;
-  }
-  if (normal) await sendAudioBuffer(chatId, normal, `🔊 تلفظ عادی — ${label}`, label);
-  if (slow) await sendAudioBuffer(chatId, slow, `🐢 تلفظ آهسته — ${label}`, `${label} (آهسته)`);
-}
-
 async function handleCallback(cb) {
   const chatId = cb.message?.chat?.id;
   const userId = cb.from?.id ?? chatId;
@@ -217,7 +254,6 @@ async function handleCallback(cb) {
   if (!chatId) return;
 
   if (data === 'cron:review') { await startReview(chatId, userId); return; }
-  if (data === 'tts') { await sendPronunciation(chatId, userId); return; }
 
   if (data === 'leitner:add') {
     const entry = await kv.getJSON(lastKey(userId));
