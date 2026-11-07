@@ -71,6 +71,7 @@ function formatEntryCompact(e) {
   else if (e.wordType) lines.push(`🏷 نوع کلمه: ${e.wordType}`);
   if (e.definitions?.length) lines.push('', `📖 ${e.definitions[0]}`);
   if (e.persian) lines.push('', `🇮🇷 معنی فارسی: ${e.persian}`);
+  if (e.examples?.length) lines.push('', `📝 مثال: ${e.examples[0]}`);
   return lines.join('\n');
 }
 
