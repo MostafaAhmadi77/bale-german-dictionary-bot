@@ -9,7 +9,7 @@ import {
 import {
   lookupGerman, formatEntry, lookupPersian, formatPersianResult, pluralText,
 } from '../lib/dictionary.js';
-import { generateImageBuffer, downloadImageBuffer, fetchCommonsPhotoUrl, fetchPixabayPhotoUrl, fetchTTSMp3 } from '../lib/media.js';
+import { generateImageBuffer, downloadImageBuffer, fetchCommonsPhotoUrl, fetchOpenversePhotoUrl, fetchPixabayPhotoUrl, fetchTTSMp3 } from '../lib/media.js';
 import { translateText, detectDirection, MAX_TEXT_CHARS } from '../lib/translate.js';
 import { applyReview } from '../lib/ai-check.js';
 import {
@@ -82,6 +82,12 @@ async function getImageBuffer(entry, conceptOverride) {
       if (url) {
         const buf = await downloadImageBuffer(url);
         if (buf) return { buf, kind: 'commons' };
+      }
+      // بعد Openverse (عکس‌های آزاد واقعی؛ بدون کلید)
+      const ovUrl = await fetchOpenversePhotoUrl(conceptOverride || entry.english);
+      if (ovUrl) {
+        const buf = await downloadImageBuffer(ovUrl);
+        if (buf) return { buf, kind: 'openverse' };
       }
     }
     // عکس استوک Pixabay — برای همه‌ی نوع‌ها، مخصوصا فعل‌ها و صحنه‌ها (اگر کلید فعال باشد)
