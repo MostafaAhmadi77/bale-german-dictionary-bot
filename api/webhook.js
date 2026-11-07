@@ -11,6 +11,7 @@ import {
 } from '../lib/dictionary.js';
 import { generateImageBuffer, downloadImageBuffer, fetchCommonsPhotoUrl, fetchPixabayPhotoUrl } from '../lib/media.js';
 import { translateText, detectDirection, MAX_TEXT_CHARS } from '../lib/translate.js';
+import { applyReview } from '../lib/ai-check.js';
 import { kv } from '../lib/store.js';
 import {
   addCard, getCard, listCards, dueCards, answerCard, removeCard, MAX_BOX,
@@ -53,28 +54,29 @@ const TTS_BASE = 'https://bale-german-dictionary-bot.vercel.app/api/tts?t=';
 const ttsUrl = (speakText) => TTS_BASE + encodeURIComponent(speakText);
 const speakOf = (e) => (e.article ? `${e.article} ${e.word}` : e.word);
 
-/** بایت تصویر کلمه: اول عکس واقعی ویکی‌واژه، وگرنه تصویر ساخته‌شده از مفهوم درست */
+/** تصویر کلمه با نوع منبعش: {buf, kind} — kind برای حکم بازبینی AI لازم است */
 async function getImageBuffer(entry, conceptOverride) {
   try {
     if (entry.image) {
       const buf = await downloadImageBuffer(entry.image);
-      if (buf) return buf;
+      if (buf) return { buf, kind: 'entry' };
     }
     // دقت تصویر: برای اسم‌ها اول عکس واقعی از کامنز (با کنترل عنوان فایل)
     if (!entry.wordType || entry.wordType === 'Substantiv') {
       const url = await fetchCommonsPhotoUrl(conceptOverride || entry.english);
       if (url) {
         const buf = await downloadImageBuffer(url);
-        if (buf) return buf;
+        if (buf) return { buf, kind: 'commons' };
       }
     }
     // عکس استوک Pixabay — برای همه‌ی نوع‌ها، مخصوصا فعل‌ها و صحنه‌ها (اگر کلید فعال باشد)
     const pixUrl = await fetchPixabayPhotoUrl(conceptOverride || entry.english);
     if (pixUrl) {
       const buf = await downloadImageBuffer(pixUrl);
-      if (buf) return buf;
+      if (buf) return { buf, kind: 'pixabay' };
     }
-    return await generateImageBuffer(entry.word, conceptOverride || entry.english, entry.wordType);
+    const gen = await generateImageBuffer(entry.word, conceptOverride || entry.english, entry.wordType);
+    return gen ? { buf: gen, kind: 'generated' } : null;
   } catch (err) {
     console.error('image error:', err);
     return null;
@@ -97,8 +99,9 @@ function formatEntryCompact(e) {
  * ارسال نتیجه: متن کامل همیشه می‌رسد (تمامی معانی).
  * اگر متن در کپشن جا شد: یک پیام واحد (عکس+متن+دکمه). اگر نشد: پیام متنی کامل + عکس جدا با دکمه‌ها.
  */
-async function sendEntryMessage(chatId, entry, text, keyboard) {
-  const buf = await getImageBuffer(entry);
+async function sendEntryMessage(chatId, entry, text, keyboard, img) {
+  const pic = img === undefined ? await getImageBuffer(entry) : img;
+  const buf = pic?.buf ?? null;
   if (buf && text.length <= CAPTION_LIMIT) {
     const r = await sendPhotoBuffer(chatId, buf, text, keyboard);
     if (r?.ok) return;
@@ -182,13 +185,22 @@ async function handleGermanLookup(chatId, userId, text) {
     await sendMessage(chatId, formatEntry(entry));
     return;
   }
+  // بازبینی AI قبل از ارسال (خواسته‌ی کاربر): تصویر و متن بررسی می‌شوند؛
+  // نامرتبط‌ها حذف/اصلاح می‌شوند. بدون کلید Gemini یا هنگام خطا، نتیجه دست‌نخورده می‌رود.
+  let img = await getImageBuffer(entry);
+  img = await applyReview(entry, img,
+    () => generateImageBuffer(entry.word, entry.english, entry.wordType));
+  if (entry.aiReviewed) {
+    // نسخه‌ی بازبینی‌شده در کش دیکشنری هم ذخیره می‌شود تا برای همه همان بیاید
+    await kv.setJSON(`dict:v7:${entry.word.toLowerCase()}`, entry).catch(() => {});
+  }
   await kv.setJSON(lastKey(userId), entry);
   // یک پیام واحد: عکس + متن کامل در کپشن + دکمه‌ی لایتنر و دکمه‌ی تلفظ (لینک پخش‌کننده)
   const keyboard = inlineKeyboard([[
     btn('📦 افزودن به لایتنر', 'leitner:add'),
     urlBtn('🔊 تلفظ', ttsUrl(speakOf(entry))),
   ]]);
-  await sendEntryMessage(chatId, entry, formatEntry(entry), keyboard);
+  await sendEntryMessage(chatId, entry, formatEntry(entry), keyboard, img);
 }
 
 async function handlePersianLookup(chatId, userId, text) {
@@ -197,6 +209,15 @@ async function handlePersianLookup(chatId, userId, text) {
     await sendMessage(chatId, formatPersianResult(result));
     return;
   }
+  // تصویر + بازبینی AI قبل از ساخت متن، تا اصلاح‌ها در متن هم دیده شوند
+  const withImage = result.equivalents.find((eq) => eq.entry?.image)?.entry;
+  const first = withImage || result.equivalents[0]?.entry;
+  let img = first ? await getImageBuffer(first, result.englishConcept) : null;
+  if (first) {
+    img = await applyReview(first, img,
+      () => generateImageBuffer(first.word, result.englishConcept || first.english, first.wordType));
+  }
+
   await kv.setJSON(lastFaKey(userId), result.equivalents.map((eq) => eq.entry || { word: eq.de }));
 
   // همان امکانات جهت برعکس: برای هر معادل آرتیکل+جمع+معنی، دکمه‌ی تلفظ و لایتنر
@@ -224,10 +245,8 @@ async function handlePersianLookup(chatId, userId, text) {
   });
   const keyboard = inlineKeyboard(rows);
 
-  // تصویرِ معادلی که عکس واقعی دارد (وگرنه معادل اول) — متن کامل همیشه می‌رسد
-  const withImage = result.equivalents.find((eq) => eq.entry?.image)?.entry;
-  const first = withImage || result.equivalents[0]?.entry;
-  const buf = first ? await getImageBuffer(first, result.englishConcept) : null;
+  // تصویرِ بازبینی‌شده (متن کامل همیشه می‌رسد)
+  const buf = img?.buf ?? null;
   if (buf && fullText.length <= CAPTION_LIMIT) {
     const r = await sendPhotoBuffer(chatId, buf, fullText, keyboard);
     if (r?.ok) return;
