@@ -12,6 +12,10 @@ import {
 import { generateImageBuffer, downloadImageBuffer, fetchCommonsPhotoUrl, fetchPixabayPhotoUrl } from '../lib/media.js';
 import { translateText, detectDirection, MAX_TEXT_CHARS } from '../lib/translate.js';
 import { applyReview } from '../lib/ai-check.js';
+import {
+  newFeedbackId, addFeedback, getFeedback, listFeedback, updateFeedback,
+  getAdminId, setAdminId,
+} from '../lib/feedback.js';
 import { kv } from '../lib/store.js';
 import {
   addCard, getCard, listCards, dueCards, answerCard, removeCard, MAX_BOX,
@@ -29,6 +33,7 @@ const HELP = `🇩🇪 دیکشنری آلمانی ⇄ فارسی
 🔁 مرور کلمات — مرور رسیده‌ها
 🌐 تغییر زبان — جابه‌جایی بین «آلمانی ← فارسی» و «فارسی ← آلمانی»
 📝 ترجمه متن — ترجمه‌ی جمله و پاراگراف (جهت خودکار تشخیص داده می‌شود)
+💬 ارسال نظر و پیشنهاد — نظرتان مستقیم به دست سازنده می‌رسد و جوابش همینجا می‌آید
 نکته: اگر در هر حالتی جمله بفرستید (۴ کلمه یا بیشتر)، خودش به‌صورت متن ترجمه می‌شود.
 
 در حالت فارسی ← آلمانی، همه‌ی معادل‌های آلمانی کلمه به ترتیب رواج نوشته می‌شوند.`;
@@ -38,11 +43,18 @@ const modeKey = (userId) => `mode:${userId}`;
 const getMode = async (userId) => (await kv.getJSON(modeKey(userId)).catch(() => null)) || 'de';
 const setMode = (userId, m) => kv.setJSON(modeKey(userId), m);
 
-const menuKeyboard = (mode) => replyKeyboard([
-  ['📦 جعبه لایتنر', '🔁 مرور کلمات'],
-  [mode === 'fa' ? '🌐 ترجمه آلمانی به فارسی' : '🌐 ترجمه فارسی به آلمانی'],
-  ['📝 ترجمه متن'],
-]);
+const menuKeyboard = async (mode, userId) => {
+  const rows = [
+    ['📦 جعبه لایتنر', '🔁 مرور کلمات'],
+    [mode === 'fa' ? '🌐 ترجمه آلمانی به فارسی' : '🌐 ترجمه فارسی به آلمانی'],
+    ['📝 ترجمه متن'],
+    ['💬 ارسال نظر و پیشنهاد'],
+  ];
+  // ردیف ادمین فقط برای خود ادمین دیده می‌شود
+  const adminId = userId ? await getAdminId() : null;
+  if (adminId && String(adminId) === String(userId)) rows.push(['📥 نظرات کاربران']);
+  return replyKeyboard(rows);
+};
 
 const lastKey = (userId) => `last:${userId}`;      // آخرین مدخل آلمانی (برای لایتنر/تلفظ)
 const lastFaKey = (userId) => `lastfa:${userId}`;  // آخرین معادل‌های فارسی→آلمانی
@@ -155,11 +167,90 @@ async function toggleMode(chatId, userId) {
     next === 'fa'
       ? '🌐 حالت عوض شد: حالا کلمه‌ی فارسی بفرستید، معادل‌های آلمانی‌اش را به ترتیب می‌گیرید.'
       : '🌐 حالت عوض شد: حالا کلمه‌ی آلمانی بفرستید، معنی فارسی + تصویر + تلفظ می‌گیرید.',
-    menuKeyboard(next),
+    await menuKeyboard(next, userId),
   );
 }
 
 /** ترجمه‌ی متن (جمله/پاراگراف) با تشخیص خودکار جهت */
+// ----- نظرات کاربران و صندوق ادمین -----
+const isAdmin = async (userId) => {
+  const a = await getAdminId();
+  return a != null && String(a) === String(userId);
+};
+const senderName = (msg) => {
+  const f = msg.from || {};
+  return f.first_name || f.username || String(f.id ?? '');
+};
+
+async function promptFeedback(chatId, userId) {
+  await kv.setJSON(pendingKey(userId), { fb: true }, 30 * 60);
+  await sendMessage(chatId, '💬 نظر، پیشنهاد یا گزارش مشکلت را بنویس و بفرست؛ مستقیم به دست سازنده می‌رسد.\n(تا ۳۰ دقیقه فرصت داری؛ بعد از آن پیام بعدی‌ات جست‌وجوی عادی حساب می‌شود.)');
+}
+
+async function saveFeedbackFromUser(chatId, userId, msg, text) {
+  await kv.del(pendingKey(userId));
+  const item = await addFeedback({
+    id: newFeedbackId(), userId, chatId,
+    name: senderName(msg), text: String(text).slice(0, 2000),
+    ts: Date.now(), status: 'new', reply: null, repliedAt: null,
+  });
+  await sendMessage(chatId, '✅ نظرت ثبت شد، ممنون! 🙏\nاگر پاسخی لازم باشد، همینجا برایت می‌آید.');
+  // اطلاع لحظه‌ای به ادمین (اگر فعال شده باشد و فرستنده خودش نباشد)
+  const adminId = await getAdminId();
+  if (adminId && String(adminId) !== String(userId)) {
+    await sendMessage(adminId,
+      `💬 نظر تازه از ${item.name}:\n\n${item.text}`,
+      inlineKeyboard([[btn('✍️ پاسخ به این نظر', `fbreply:${item.id}`)]])).catch(() => {});
+  }
+}
+
+async function showInbox(chatId) {
+  const items = await listFeedback(10);
+  if (!items.length) { await sendMessage(chatId, '📥 هنوز نظری ثبت نشده است.'); return; }
+  const lines = ['📥 آخرین نظرهای کاربران:', ''];
+  items.forEach((it, i) => {
+    const st = it.status === 'answered' ? '✅ پاسخ داده شد' : '🆕 بی‌پاسخ';
+    lines.push(`${i + 1}. ${st} — ${it.name}:`);
+    lines.push(it.text.length > 160 ? it.text.slice(0, 160) + '…' : it.text, '');
+  });
+  const rows = items.filter((it) => it.status !== 'answered')
+    .map((it) => [btn(`✍️ پاسخ به ${it.name}`, `fbreply:${it.id}`)]);
+  await sendMessage(chatId, lines.join('\n'), rows.length ? inlineKeyboard(rows) : undefined);
+}
+
+async function handleAdminCommand(chatId, userId, text) {
+  const adminId = await getAdminId();
+  if (!adminId) {
+    // فعال‌سازی یک‌باره‌ی ادمین با رمز راه‌اندازی (همان SETUP_SECRET)
+    const secret = text.split(/\s+/)[1];
+    if (secret && process.env.SETUP_SECRET && secret === process.env.SETUP_SECRET) {
+      await setAdminId(userId);
+      await sendMessage(chatId, '👑 ادمین فعال شد! از این به بعد دکمه‌ی «📥 نظرات کاربران» را در منو داری و هر نظر تازه همان لحظه برایت می‌آید.', await menuKeyboard(await getMode(userId), userId));
+      await showInbox(chatId);
+    } else {
+      await sendMessage(chatId, 'برای فعال‌سازی ادمین این‌طور بفرست:\n/admin <رمز راه‌اندازی>');
+    }
+    return;
+  }
+  if (String(adminId) !== String(userId)) {
+    await sendMessage(chatId, 'این بخش فقط برای ادمین ربات است.');
+    return;
+  }
+  await showInbox(chatId);
+}
+
+async function deliverAdminReply(chatId, userId, replyText) {
+  const pending = await kv.getJSON(pendingKey(userId));
+  await kv.del(pendingKey(userId));
+  const item = pending?.fbreply ? await getFeedback(pending.fbreply) : null;
+  if (!item) { await sendMessage(chatId, 'این نظر دیگر پیدا نشد.'); return; }
+  const excerpt = item.text.length > 120 ? item.text.slice(0, 120) + '…' : item.text;
+  await sendMessage(item.chatId,
+    `📩 پاسخ به نظرت:\n\n${replyText}\n\n— نظر تو: «${excerpt}»`);
+  await updateFeedback(item.id, { status: 'answered', reply: replyText, repliedAt: Date.now() });
+  await sendMessage(chatId, `✅ پاسخت برای ${item.name} ارسال شد.`);
+}
+
 async function handleTextTranslation(chatId, text) {
   if (text.length > MAX_TEXT_CHARS) {
     await sendMessage(chatId, `⚠️ متن طولانی است؛ حداکثر ${MAX_TEXT_CHARS} نویسه در هر پیام ترجمه می‌شود. متن را تکه‌تکه بفرستید.`);
@@ -266,12 +357,12 @@ async function handleMessage(msg) {
 
   if (text === '/start') {
     const mode = await getMode(userId);
-    await sendMessage(chatId, `سلام! 👋\n\n${HELP}`, menuKeyboard(mode));
+    await sendMessage(chatId, `سلام! 👋\n\n${HELP}`, await menuKeyboard(mode, userId));
     return;
   }
   if (text === '/help') { await sendMessage(chatId, HELP); return; }
   if (text === '/menu') {
-    await sendMessage(chatId, 'منوی اصلی:', menuKeyboard(await getMode(userId)));
+    await sendMessage(chatId, 'منوی اصلی:', await menuKeyboard(await getMode(userId), userId));
     return;
   }
 
@@ -284,10 +375,18 @@ async function handleMessage(msg) {
     await sendMessage(
       chatId,
       '📝 حالت ترجمه‌ی متن فعال شد.\nجمله یا پاراگراف بفرستید — آلمانی باشد به فارسی و فارسی باشد به آلمانی ترجمه می‌شود (تشخیص خودکار).\nبرای برگشتن به دیکشنری، دکمه‌ی 🌐 را بزنید.',
-      menuKeyboard('text'),
+      await menuKeyboard('text', userId),
     );
     return;
   }
+
+  if (text === '💬 ارسال نظر و پیشنهاد' || text === '/feedback') { await promptFeedback(chatId, userId); return; }
+  if (text === '📥 نظرات کاربران') {
+    if (await isAdmin(userId)) await showInbox(chatId);
+    else await sendMessage(chatId, 'این بخش فقط برای ادمین ربات است.');
+    return;
+  }
+  if (text === '/admin' || text.startsWith('/admin ')) { await handleAdminCommand(chatId, userId, text); return; }
 
   if (text === '/lang') { await toggleMode(chatId, userId); return; }
   if (text === '/due') {
@@ -300,6 +399,15 @@ async function handleMessage(msg) {
   if (text.startsWith('/')) {
     await sendMessage(chatId, 'دستور ناشناخته است. /help را ببین.');
     return;
+  }
+
+  // حالت‌های «در انتظار متن» (نظر کاربر / پاسخ ادمین) — پیش از هر مسیریابی دیگری مصرف می‌شوند،
+  // چون نظرها معمولا جمله‌اند و نباید ترجمه یا جست‌وجو شوند.
+  const pending = await kv.getJSON(pendingKey(userId)).catch(() => null);
+  if (pending?.fb) { await saveFeedbackFromUser(chatId, userId, msg, text); return; }
+  if (pending?.fbreply) {
+    if (await isAdmin(userId)) { await deliverAdminReply(chatId, userId, text); return; }
+    await kv.del(pendingKey(userId));
   }
 
   const mode = await getMode(userId);
@@ -333,6 +441,16 @@ async function handleCallback(cb) {
   if (!chatId) return;
 
   if (data === 'cron:review') { await startReview(chatId, userId); return; }
+
+  if (data.startsWith('fbreply:')) {
+    if (!(await isAdmin(userId))) { await sendMessage(chatId, 'این بخش فقط برای ادمین ربات است.'); return; }
+    const id = data.split(':')[1];
+    const item = await getFeedback(id);
+    if (!item) { await sendMessage(chatId, 'این نظر دیگر پیدا نشد.'); return; }
+    await kv.setJSON(pendingKey(userId), { fbreply: id }, 30 * 60);
+    await sendMessage(chatId, `✍️ پاسخ به نظر ${item.name}:\n«${item.text.slice(0, 200)}»\n\nپاسخت را بنویس و بفرست:`);
+    return;
+  }
 
   if (data === 'leitner:add') {
     const entry = await kv.getJSON(lastKey(userId));
