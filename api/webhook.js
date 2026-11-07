@@ -1,31 +1,62 @@
 // نقطه‌ی ورود ربات بله — وبهوک (Vercel Serverless Function)
 // بله آپدیت‌ها را با POST به این آدرس می‌فرستد (هم‌شکل آپدیت‌های تلگرام).
+// امکانات: دیکشنری آلمانی→فارسی و فارسی→آلمانی، تصویر هر کلمه، تلفظ صوتی، جعبه‌ی لایتنر، منوی دکمه‌ای.
 
-import { sendMessage, answerCallbackQuery, inlineKeyboard, btn } from '../lib/bale.js';
-import { lookupGerman, formatEntry } from '../lib/dictionary.js';
+import {
+  sendMessage, answerCallbackQuery, inlineKeyboard, btn, replyKeyboard,
+  sendPhotoBuffer, sendAudioBuffer,
+} from '../lib/bale.js';
+import {
+  lookupGerman, formatEntry, lookupPersian, formatPersianResult,
+} from '../lib/dictionary.js';
+import { generateImageBuffer, downloadImageBuffer, fetchTTSMp3 } from '../lib/media.js';
 import { kv } from '../lib/store.js';
 import {
-  addCard, getCard, listCards, dueCards, answerCard, removeCard, formatCardList, MAX_BOX,
+  addCard, getCard, listCards, dueCards, answerCard, removeCard, MAX_BOX,
 } from '../lib/leitner.js';
 
-const HELP = `🇩🇪 دیکشنری آلمانی به فارسی
+const HELP = `🇩🇪 دیکشنری آلمانی ⇄ فارسی
 
-فقط کلمه‌ی آلمانی را بفرستید؛ در جواب می‌گیرید:
+کلمه بفرستید و بگیرید:
 • آرتیکل (der / die / das) و حالت جمع
-• توضیح کلمه به زبان آلمانی
-• معنی فارسی
+• توضیح به آلمانی + معنی فارسی
+• 🖼 تصویر کلمه و دکمه‌ی 🔊 تلفظ (عادی و آهسته)
 
-دستورها:
-/start — شروع
-/help — همین راهنما
-/mywords — کلمه‌های جعبه‌ی لایتنر
-/review — مرور کلمه‌هایی که وقتشان رسیده
-/due — چند کلمه امروز برای مرور داری؟
+از منوی پایین استفاده کنید:
+📦 جعبه لایتنر — کلمه‌های ذخیره‌شده به ترتیب
+🔁 مرور کلمات — مرور رسیده‌ها
+🌐 تغییر زبان — جابه‌جایی بین «آلمانی ← فارسی» و «فارسی ← آلمانی»
 
-📦 لایتنر: بعد از هر جست‌وجو دکمه‌ی «افزودن به لایتنر» را بزنید و انتخاب کنید هر چند روز یک‌بار مرور شود. ربات سر وقت خودش کلمه را برای مرور می‌فرستد.`;
+در حالت فارسی ← آلمانی، همه‌ی معادل‌های آلمانی کلمه به ترتیب رواج نوشته می‌شوند.`;
 
-const lastKey = (userId) => `last:${userId}`;
+// ----- حالت زبان هر کاربر: 'de' = آلمانی→فارسی | 'fa' = فارسی→آلمانی -----
+const modeKey = (userId) => `mode:${userId}`;
+const getMode = async (userId) => (await kv.getJSON(modeKey(userId)).catch(() => null)) || 'de';
+const setMode = (userId, m) => kv.setJSON(modeKey(userId), m);
+
+const menuKeyboard = (mode) => replyKeyboard([
+  ['📦 جعبه لایتنر', '🔁 مرور کلمات'],
+  [mode === 'de' ? '🌐 ترجمه فارسی به آلمانی' : '🌐 ترجمه آلمانی به فارسی'],
+]);
+
+const lastKey = (userId) => `last:${userId}`;      // آخرین مدخل آلمانی (برای لایتنر/تلفظ)
+const lastFaKey = (userId) => `lastfa:${userId}`;  // آخرین معادل‌های فارسی→آلمانی
 const pendingKey = (userId) => `pending:${userId}`;
+
+/** ارسال تصویر کلمه: اول عکس واقعی ویکی‌واژه، وگرنه تصویر ساخته‌شده با AI */
+async function sendWordImage(chatId, entry) {
+  try {
+    let buf = null;
+    if (entry.image) buf = await downloadImageBuffer(entry.image);
+    if (!buf) buf = await generateImageBuffer(entry.word, entry.english);
+    if (buf) {
+      await sendPhotoBuffer(chatId, buf,
+        `🖼 ${entry.article ? entry.article + ' ' : ''}${entry.word}${entry.persian ? ` — ${entry.persian}` : ''}`);
+    }
+  } catch (err) {
+    console.error('image error:', err);
+  }
+}
 
 async function startReview(chatId, userId) {
   const due = await dueCards(userId);
@@ -40,10 +71,70 @@ async function startReview(chatId, userId) {
   await sendMessage(
     chatId,
     `🔁 مرور (${due.length} کلمه باقی مانده)\n\nاین کلمه را به یاد می‌آوری؟\n\n🇩🇪 ${card.entry.article ? card.entry.article + ' ' : ''}${card.word}\nخانه‌ی ${card.box} از ${MAX_BOX}`,
-    inlineKeyboard([[
-      btn('👀 نمایش معنی', `rev:show:${card.id}`),
-    ]]),
+    inlineKeyboard([[btn('👀 نمایش معنی', `rev:show:${card.id}`)]]),
   );
+}
+
+/** نمایش جعبه‌ی لایتنر به ترتیب اضافه شدن */
+async function showBox(chatId, userId) {
+  const cards = await listCards(userId, 'created');
+  if (!cards.length) {
+    await sendMessage(chatId, '📦 جعبه‌ی لایتنرت خالی است.\nیک کلمه جست‌وجو کن و دکمه‌ی «افزودن به لایتنر» را بزن.');
+    return;
+  }
+  const lines = ['📦 جعبه‌ی لایتنر شما (به ترتیب اضافه شدن):', ''];
+  cards.forEach((c, i) => {
+    const due = c.nextReviewAt <= Date.now() ? '⏰ رسیده' : '';
+    lines.push(`${i + 1}. ${c.entry.article ? c.entry.article + ' ' : ''}${c.word} — خانه‌ی ${c.box} ${due}`);
+  });
+  await sendMessage(chatId, lines.join('\n'),
+    inlineKeyboard([[btn('🔁 شروع مرور', 'cron:review')]]));
+}
+
+async function toggleMode(chatId, userId) {
+  const cur = await getMode(userId);
+  const next = cur === 'de' ? 'fa' : 'de';
+  await setMode(userId, next);
+  await sendMessage(
+    chatId,
+    next === 'fa'
+      ? '🌐 حالت عوض شد: حالا کلمه‌ی فارسی بفرستید، معادل‌های آلمانی‌اش را به ترتیب می‌گیرید.'
+      : '🌐 حالت عوض شد: حالا کلمه‌ی آلمانی بفرستید، معنی فارسی + تصویر + تلفظ می‌گیرید.',
+    menuKeyboard(next),
+  );
+}
+
+async function handleGermanLookup(chatId, userId, text) {
+  const entry = await lookupGerman(text);
+  await sendMessage(
+    chatId,
+    formatEntry(entry),
+    entry.found
+      ? inlineKeyboard([
+          [btn('📦 افزودن به لایتنر', 'leitner:add'), btn('🔊 تلفظ', 'tts')],
+        ])
+      : undefined,
+  );
+  if (entry.found) {
+    await kv.setJSON(lastKey(userId), entry);
+    await sendWordImage(chatId, entry); // تصویر بعد از متن
+  }
+}
+
+async function handlePersianLookup(chatId, userId, text) {
+  const result = await lookupPersian(text);
+  if (!result.found) {
+    await sendMessage(chatId, formatPersianResult(result));
+    return;
+  }
+  // برای هر معادل یک دکمه‌ی افزودن به لایتنر
+  const rows = result.equivalents.map((eq, i) => [
+    btn(`📦 افزودن «${eq.de}» به لایتنر`, `faadd:${i}`),
+  ]);
+  await sendMessage(chatId, formatPersianResult(result), inlineKeyboard(rows));
+  await kv.setJSON(lastFaKey(userId), result.equivalents.map((eq) => eq.entry || { word: eq.de }));
+  const first = result.equivalents[0]?.entry;
+  if (first) await sendWordImage(chatId, first);
 }
 
 async function handleMessage(msg) {
@@ -53,20 +144,26 @@ async function handleMessage(msg) {
   if (!chatId || !text) return;
 
   if (text === '/start') {
-    await sendMessage(chatId, `سلام! 👋\n\n${HELP}`);
+    const mode = await getMode(userId);
+    await sendMessage(chatId, `سلام! 👋\n\n${HELP}`, menuKeyboard(mode));
     return;
   }
   if (text === '/help') { await sendMessage(chatId, HELP); return; }
-
-  if (text === '/mywords') {
-    await sendMessage(chatId, formatCardList(await listCards(userId)));
+  if (text === '/menu') {
+    await sendMessage(chatId, 'منوی اصلی:', menuKeyboard(await getMode(userId)));
     return;
   }
-  if (text === '/review') { await startReview(chatId, userId); return; }
+
+  // دکمه‌های منوی پایین
+  if (text === '📦 جعبه لایتنر' || text === '/mywords') { await showBox(chatId, userId); return; }
+  if (text === '🔁 مرور کلمات' || text === '/review') { await startReview(chatId, userId); return; }
+  if (text.startsWith('🌐')) { await toggleMode(chatId, userId); return; }
+
+  if (text === '/lang') { await toggleMode(chatId, userId); return; }
   if (text === '/due') {
     const due = await dueCards(userId);
     await sendMessage(chatId, due.length
-      ? `⏰ امروز ${due.length} کلمه برای مرور داری. با /review شروع کن.`
+      ? `⏰ امروز ${due.length} کلمه برای مرور داری. با دکمه‌ی «مرور کلمات» شروع کن.`
       : '🎉 امروز چیزی برای مرور نداری.');
     return;
   }
@@ -75,16 +172,39 @@ async function handleMessage(msg) {
     return;
   }
 
-  // جست‌وجوی کلمه
-  const entry = await lookupGerman(text);
+  const mode = await getMode(userId);
+  if (mode === 'fa') await handlePersianLookup(chatId, userId, text);
+  else await handleGermanLookup(chatId, userId, text);
+}
+
+async function askInterval(chatId, userId, entry) {
+  await kv.setJSON(pendingKey(userId), { entry }, 10 * 60);
   await sendMessage(
     chatId,
-    formatEntry(entry),
-    entry.found
-      ? inlineKeyboard([[btn('📦 افزودن به لایتنر', 'leitner:add')]])
-      : undefined,
+    `📦 «${entry.word}» هر چند روز یک‌بار مرور شود؟`,
+    inlineKeyboard([[
+      btn('هر روز', 'leitner:int:1'),
+      btn('هر ۳ روز', 'leitner:int:3'),
+      btn('هر هفته', 'leitner:int:7'),
+    ]]),
   );
-  if (entry.found) await kv.setJSON(lastKey(userId), entry);
+}
+
+async function sendPronunciation(chatId, userId) {
+  const entry = await kv.getJSON(lastKey(userId));
+  if (!entry) { await sendMessage(chatId, 'اول یک کلمه‌ی آلمانی جست‌وجو کن.'); return; }
+  const label = `${entry.article ? entry.article + ' ' : ''}${entry.word}`;
+  const speakText = entry.article ? `${entry.article} ${entry.word}` : entry.word;
+  const [normal, slow] = await Promise.all([
+    fetchTTSMp3(speakText, false),
+    fetchTTSMp3(speakText, true),
+  ]);
+  if (!normal && !slow) {
+    await sendMessage(chatId, '⚠️ تلفظ الان در دسترس نیست. دوباره تلاش کن.');
+    return;
+  }
+  if (normal) await sendAudioBuffer(chatId, normal, `🔊 تلفظ عادی — ${label}`, label);
+  if (slow) await sendAudioBuffer(chatId, slow, `🐢 تلفظ آهسته — ${label}`, `${label} (آهسته)`);
 }
 
 async function handleCallback(cb) {
@@ -95,21 +215,21 @@ async function handleCallback(cb) {
   if (!chatId) return;
 
   if (data === 'cron:review') { await startReview(chatId, userId); return; }
+  if (data === 'tts') { await sendPronunciation(chatId, userId); return; }
 
-  // افزودن آخرین کلمه‌ی جست‌وجوشده به لایتنر -> انتخاب بازه‌ی مرور توسط کاربر
   if (data === 'leitner:add') {
     const entry = await kv.getJSON(lastKey(userId));
     if (!entry) { await sendMessage(chatId, 'اول یک کلمه جست‌وجو کن.'); return; }
-    await kv.setJSON(pendingKey(userId), { entry }, 10 * 60);
-    await sendMessage(
-      chatId,
-      `📦 «${entry.word}» هر چند روز یک‌بار مرور شود؟`,
-      inlineKeyboard([[
-        btn('هر روز', 'leitner:int:1'),
-        btn('هر ۳ روز', 'leitner:int:3'),
-        btn('هر هفته', 'leitner:int:7'),
-      ]]),
-    );
+    await askInterval(chatId, userId, entry);
+    return;
+  }
+
+  if (data.startsWith('faadd:')) {
+    const idx = Number(data.split(':')[1]);
+    const list = await kv.getJSON(lastFaKey(userId));
+    const entry = list?.[idx];
+    if (!entry) { await sendMessage(chatId, 'مهلت این افزودن تمام شده؛ کلمه را دوباره جست‌وجو کن.'); return; }
+    await askInterval(chatId, userId, entry);
     return;
   }
 
@@ -123,7 +243,6 @@ async function handleCallback(cb) {
     return;
   }
 
-  // مرور: نمایش معنی
   if (data.startsWith('rev:show:')) {
     const card = await getCard(userId, data.split(':')[2]);
     if (!card) { await sendMessage(chatId, 'این کارت دیگر نیست.'); return; }
@@ -147,7 +266,7 @@ async function handleCallback(cb) {
         ? `✅ آفرین! «${card.word}» رفت به خانه‌ی ${card.box}.`
         : `🔁 «${card.word}» برگشت به خانه‌ی ۱ تا دوباره مرور شود.`);
     }
-    await startReview(chatId, userId); // کارت بعدیِ رسیده
+    await startReview(chatId, userId);
     return;
   }
 
@@ -170,6 +289,5 @@ export default async function handler(req, res) {
   } catch (err) {
     console.error('webhook error:', err);
   }
-  // بله مثل تلگرام: همیشه 200 بده تا آپدیت دوباره ارسال نشود
   res.status(200).json({ ok: true });
 }
