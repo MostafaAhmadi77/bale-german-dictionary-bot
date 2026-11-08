@@ -18,7 +18,7 @@ import {
 } from '../lib/feedback.js';
 import {
   authEnabled, setAuthEnabled, getReg, saveReg, addPending, removePending,
-  listPendingRegs, grandfatherExistingUsers,
+  listPendingRegs, listApproved, grandfatherExistingUsers,
 } from '../lib/auth.js';
 import { kv } from '../lib/store.js';
 import {
@@ -281,6 +281,10 @@ async function authGateMessage(msg, chatId, userId, text) {
   if (!(await authEnabled())) return false;
   const reg = await getReg(userId);
   if (reg?.status === 'approved') return false;
+  if (reg?.status === 'blocked') {
+    await sendMessage(chatId, '🚫 دسترسی‌ات به ربات توسط ادمین قطع شده.');
+    return true;
+  }
   if (reg?.status === 'pending') {
     await sendMessage(chatId, '⏳ درخواست ثبت‌نامت در انتظار تأیید ادمینه. به محض تأیید، همین‌جا خبرت می‌کنم. 🙏');
     return true;
@@ -339,15 +343,33 @@ async function decideRegistration(chatId, targetId, ok) {
 async function showAuthPanel(chatId) {
   const on = await authEnabled();
   const n = (await listPendingRegs()).length;
+  const approvedCount = (await listApproved()).length;
   await sendMessage(chatId, [
     `🔐 سیستم احراز هویت الان: ${on ? '✅ روشن' : '⚪ خاموش'}`,
     `👥 درخواست‌های در انتظار تأیید: ${n}`,
+    `✅ کاربران تأییدشده: ${approvedCount}`,
     '',
     'وقتی روشنه، کاربرای تازه باید فرم ثبت‌نام پر کنن و منتظر تأییدت بمونن؛ کاربرای قدیمی خودکار تأییدشده‌ان.',
   ].join('\n'), inlineKeyboard([
     [btn(on ? '⚪ خاموش کردن احراز هویت' : '✅ روشن کردن احراز هویت', 'authtoggle')],
     [btn('👥 درخواست‌های در انتظار', 'reglist')],
+    [btn('✅ کاربران تأییدشده', 'regusers')],
   ]));
+}
+
+/** فهرست کاربران تأییدشده با اطلاعات ثبت‌نامشان (فقط ادمین) */
+async function showApprovedUsers(chatId) {
+  const list = await listApproved();
+  if (!list.length) { await sendMessage(chatId, '✅ هنوز کاربر تأییدشده‌ای نیست.'); return; }
+  await sendMessage(chatId, `✅ کاربران تأییدشده (${list.length} نفر):`);
+  for (const r of list.slice(0, 15)) {
+    const body = r.legacy
+      ? `👤 کاربر قدیمی (تأیید خودکار — بدون فرم ثبت‌نام)\n🆔 آیدی بله: ${r.userId}`
+      : `${regCardText(r)}\n🆔 آیدی بله: ${r.userId}`;
+    await sendMessage(chatId, body,
+      inlineKeyboard([[btn('🚫 لغو دسترسی', `regrevoke:${r.userId}`)]]));
+  }
+  if (list.length > 15) await sendMessage(chatId, `… و ${list.length - 15} نفر دیگر.`);
 }
 
 async function showPendingRegs(chatId) {
@@ -663,7 +685,9 @@ async function handleCallback(cb) {
     if (reg?.status !== 'approved' && !inFlow) {
       await sendMessage(chatId, reg?.status === 'pending'
         ? '⏳ درخواست ثبت‌نامت در انتظار تأیید ادمینه.'
-        : '🔐 برای استفاده از ربات اول باید ثبت‌نام کنی؛ یه پیام بفرست تا فرم رو شروع کنیم.');
+        : reg?.status === 'blocked'
+          ? '🚫 دسترسی‌ات به ربات توسط ادمین قطع شده.'
+          : '🔐 برای استفاده از ربات اول باید ثبت‌نام کنی؛ یه پیام بفرست تا فرم رو شروع کنیم.');
       return;
     }
   }
@@ -696,6 +720,23 @@ async function handleCallback(cb) {
   if (data.startsWith('regok:') || data.startsWith('regno:')) {
     if (!(await isAdmin(userId))) { await sendMessage(chatId, 'این بخش فقط برای ادمین ربات است.'); return; }
     await decideRegistration(chatId, data.slice(6), data.startsWith('regok:'));
+    return;
+  }
+  if (data === 'regusers') {
+    if (!(await isAdmin(userId))) { await sendMessage(chatId, 'این بخش فقط برای ادمین ربات است.'); return; }
+    await showApprovedUsers(chatId);
+    return;
+  }
+  if (data.startsWith('regrevoke:')) {
+    if (!(await isAdmin(userId))) { await sendMessage(chatId, 'این بخش فقط برای ادمین ربات است.'); return; }
+    const targetId = data.slice('regrevoke:'.length);
+    const reg = await getReg(targetId);
+    if (!reg || reg.status !== 'approved') { await sendMessage(chatId, 'این کاربر تأییدشده نیست.'); return; }
+    reg.status = 'blocked';
+    reg.decidedAt = Date.now();
+    await saveReg(targetId, reg);
+    if (reg.chatId) await sendMessage(reg.chatId, '🚫 دسترسی‌ات به ربات توسط ادمین قطع شد.');
+    await sendMessage(chatId, `🚫 دسترسی کاربر ${reg.firstName ? `«${reg.firstName} ${reg.lastName}»` : targetId} قطع شد.`);
     return;
   }
   if (data === 'tts' || data.startsWith('tts:')) { await handleTts(chatId, userId, data.slice(4), false); return; }
