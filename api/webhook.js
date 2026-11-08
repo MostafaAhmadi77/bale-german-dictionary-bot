@@ -16,6 +16,10 @@ import {
   newFeedbackId, addFeedback, getFeedback, listFeedback, updateFeedback,
   getAdminId, setAdminId,
 } from '../lib/feedback.js';
+import {
+  authEnabled, setAuthEnabled, getReg, saveReg, addPending, removePending,
+  listPendingRegs, grandfatherExistingUsers,
+} from '../lib/auth.js';
 import { kv } from '../lib/store.js';
 import {
   addCard, getCard, listCards, dueCards, answerCard, removeCard, MAX_BOX,
@@ -52,7 +56,7 @@ const menuKeyboard = async (mode, userId) => {
   ];
   // ردیف ادمین فقط برای خود ادمین دیده می‌شود
   const adminId = userId ? await getAdminId() : null;
-  if (adminId && String(adminId) === String(userId)) rows.push(['📥 نظرات کاربران']);
+  if (adminId && String(adminId) === String(userId)) rows.push(['📥 نظرات کاربران', '🔐 احراز هویت']);
   return replyKeyboard(rows);
 };
 
@@ -181,6 +185,180 @@ async function toggleMode(chatId, userId) {
 }
 
 /** ترجمه‌ی متن (جمله/پاراگراف) با تشخیص خودکار جهت */
+// ----- احراز هویت: فرم ثبت‌نام + تأیید ادمین + کلید روشن/خاموش -----
+const normalizeDigits = (s) => String(s || '')
+  .replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d))
+  .replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d));
+
+const regCardText = (r) => [
+  `👤 ${r.firstName} ${r.lastName}`,
+  `📱 شماره همراه: ${r.phone}`,
+  `🎂 تاریخ تولد: ${r.birth}`,
+  r.baleName ? `💬 نام در بله: ${r.baleName}` : null,
+].filter(Boolean).join('\n');
+
+async function sendRegReview(chatId, data) {
+  await sendMessage(chatId, [
+    '📋 بررسی نهایی ثبت‌نام:',
+    '',
+    `نام: ${data.firstName}`,
+    `نام خانوادگی: ${data.lastName}`,
+    `شماره همراه: ${data.phone}`,
+    `تاریخ تولد: ${data.birth}`,
+    '',
+    'اگه همه‌چیز درسته «✅ تأیید نهایی» رو بزن؛ برای اصلاح «✏️ ویرایش» رو بزن.',
+  ].join('\n'), inlineKeyboard([[
+    btn('✅ تأیید نهایی', 'reg:confirm'),
+    btn('✏️ ویرایش', 'reg:edit'),
+  ]]));
+}
+
+/** قدم‌های فرم ثبت‌نام؛ هر پیام کاربر در وضعیت فرم، اینجا مصرف می‌شود */
+async function handleRegFormStep(chatId, userId, msg, text) {
+  const pending = await kv.getJSON(pendingKey(userId)).catch(() => null);
+  const form = pending?.reg;
+  if (!form) {
+    await kv.setJSON(pendingKey(userId), { reg: { step: 'first', data: {} } }, 30 * 60);
+    await sendMessage(chatId,
+      '🔐 برای استفاده از ربات اول باید ثبت‌نام کنی و ادمین تأییدت کنه.\nفرم رو قدم‌به‌قدم با هم پر می‌کنیم:\n\n۱️⃣ نامت چیه؟');
+    return;
+  }
+  const data = { ...(form.data || {}) };
+  const save = (step) => kv.setJSON(pendingKey(userId), { reg: { step, data } }, 30 * 60);
+  if (form.step === 'first') {
+    const v = text.trim();
+    if (v.length < 2 || v.length > 40 || v.startsWith('/')) {
+      await sendMessage(chatId, 'نام رو درست بنویس (فقط خود اسم):');
+      return;
+    }
+    data.firstName = v;
+    await save('last');
+    await sendMessage(chatId, '۲️⃣ نام خانوادگیت چیه؟');
+    return;
+  }
+  if (form.step === 'last') {
+    const v = text.trim();
+    if (v.length < 2 || v.length > 40 || v.startsWith('/')) {
+      await sendMessage(chatId, 'نام خانوادگی رو درست بنویس:');
+      return;
+    }
+    data.lastName = v;
+    await save('phone');
+    await sendMessage(chatId, '۳️⃣ شماره همراهت رو بنویس (مثل 09123456789):');
+    return;
+  }
+  if (form.step === 'phone') {
+    const v = normalizeDigits(text).replace(/[\s-]/g, '');
+    if (!/^09\d{9}$/.test(v)) {
+      await sendMessage(chatId, '❌ شماره همراه درست نیست؛ باید با 09 شروع بشه و ۱۱ رقم باشه. دوباره بنویس:');
+      return;
+    }
+    data.phone = v;
+    await save('birth');
+    await sendMessage(chatId, '۴️⃣ تاریخ تولدت رو شمسی بنویس (مثل 1377/11/18):');
+    return;
+  }
+  if (form.step === 'birth') {
+    const v = normalizeDigits(text).trim();
+    const m = v.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+    const ok = m && +m[1] >= 1300 && +m[1] <= 1410 && +m[2] >= 1 && +m[2] <= 12 && +m[3] >= 1 && +m[3] <= 31;
+    if (!ok) {
+      await sendMessage(chatId, '❌ تاریخ تولد درست نیست؛ شمسی و دقیقاً این‌جوری بنویس: 1377/11/18');
+      return;
+    }
+    data.birth = `${m[1]}/${m[2].padStart(2, '0')}/${m[3].padStart(2, '0')}`;
+    await save('review');
+    await sendRegReview(chatId, data);
+    return;
+  }
+  // step === 'review': متن تازه یعنی هنوز روی دکمه‌ها تصمیم نگرفته؛ بررسی را دوباره نشان بده
+  await sendRegReview(chatId, data);
+}
+
+/** دروازه‌ی احراز هویت برای پیام‌ها؛ true یعنی پیام همین‌جا مصرف شد */
+async function authGateMessage(msg, chatId, userId, text) {
+  if (await isAdmin(userId)) return false;
+  if (!(await authEnabled())) return false;
+  const reg = await getReg(userId);
+  if (reg?.status === 'approved') return false;
+  if (reg?.status === 'pending') {
+    await sendMessage(chatId, '⏳ درخواست ثبت‌نامت در انتظار تأیید ادمینه. به محض تأیید، همین‌جا خبرت می‌کنم. 🙏');
+    return true;
+  }
+  await handleRegFormStep(chatId, userId, msg, text);
+  return true;
+}
+
+async function confirmRegistration(chatId, userId, fromUser) {
+  const pending = await kv.getJSON(pendingKey(userId)).catch(() => null);
+  const form = pending?.reg;
+  if (!form || form.step !== 'review' || !form.data?.phone) {
+    await sendMessage(chatId, 'فرم ثبت‌نامی پیدا نشد؛ یه پیام بفرست تا از اول شروع کنیم.');
+    return;
+  }
+  const reg = {
+    ...form.data,
+    status: 'pending',
+    ts: Date.now(),
+    chatId,
+    baleName: fromUser?.first_name || fromUser?.username || '',
+  };
+  await saveReg(userId, reg);
+  await addPending(userId);
+  await kv.del(pendingKey(userId));
+  await sendMessage(chatId, '✅ فرم ثبت‌نامت ارسال شد!\n⏳ حالا در انتظار تأیید ادمینی؛ به محض تأیید، همین‌جا خبرت می‌کنم.');
+  const adminId = await getAdminId();
+  if (adminId && String(adminId) !== String(userId)) {
+    // در گفت‌وگوی خصوصی بله، آیدی چت ادمین همان آیدی کاربری اوست
+    await sendMessage(adminId, `🆕 درخواست ثبت‌نام تازه:\n\n${regCardText(reg)}`,
+      inlineKeyboard([[btn('✅ تأیید کاربر', `regok:${userId}`), btn('❌ رد کردن', `regno:${userId}`)]]));
+  }
+}
+
+async function decideRegistration(chatId, targetId, ok) {
+  const reg = await getReg(targetId);
+  if (!reg || reg.status !== 'pending') {
+    await sendMessage(chatId, 'این درخواست قبلاً تعیین تکلیف شده.');
+    return;
+  }
+  reg.status = ok ? 'approved' : 'rejected';
+  reg.decidedAt = Date.now();
+  await saveReg(targetId, reg);
+  await removePending(targetId);
+  if (reg.chatId) {
+    await sendMessage(reg.chatId, ok
+      ? '✅ ثبت‌نامت تأیید شد! خوش اومدی 🎉\nحالا می‌تونی از همه‌ی امکانات ربات استفاده کنی؛ یه کلمه بفرست تا شروع کنیم.'
+      : '❌ متأسفانه درخواست ثبت‌نامت تأیید نشد. اگه فکر می‌کنی اشتباهی شده، می‌تونی فرم رو دوباره پر کنی.');
+    if (ok) await sendMessage(reg.chatId, 'منوی اصلی:', await menuKeyboard(await getMode(targetId), targetId));
+  }
+  await sendMessage(chatId, ok
+    ? `✅ کاربر «${reg.firstName} ${reg.lastName}» تأیید شد.`
+    : `❌ درخواست «${reg.firstName} ${reg.lastName}» رد شد.`);
+}
+
+async function showAuthPanel(chatId) {
+  const on = await authEnabled();
+  const n = (await listPendingRegs()).length;
+  await sendMessage(chatId, [
+    `🔐 سیستم احراز هویت الان: ${on ? '✅ روشن' : '⚪ خاموش'}`,
+    `👥 درخواست‌های در انتظار تأیید: ${n}`,
+    '',
+    'وقتی روشنه، کاربرای تازه باید فرم ثبت‌نام پر کنن و منتظر تأییدت بمونن؛ کاربرای قدیمی خودکار تأییدشده‌ان.',
+  ].join('\n'), inlineKeyboard([
+    [btn(on ? '⚪ خاموش کردن احراز هویت' : '✅ روشن کردن احراز هویت', 'authtoggle')],
+    [btn('👥 درخواست‌های در انتظار', 'reglist')],
+  ]));
+}
+
+async function showPendingRegs(chatId) {
+  const list = await listPendingRegs();
+  if (!list.length) { await sendMessage(chatId, '👥 درخواستی در انتظار تأیید نیست.'); return; }
+  for (const r of list) {
+    await sendMessage(chatId, `🆕 درخواست ثبت‌نام:\n\n${regCardText(r)}`,
+      inlineKeyboard([[btn('✅ تأیید کاربر', `regok:${r.userId}`), btn('❌ رد کردن', `regno:${r.userId}`)]]));
+  }
+}
+
 // ----- نظرات کاربران و صندوق ادمین -----
 const isAdmin = async (userId) => {
   const a = await getAdminId();
@@ -364,6 +542,11 @@ async function handleMessage(msg) {
   const text = (msg.text || '').trim();
   if (!chatId || !text) return;
 
+  // رجیستری کاربرها (برای تأیید خودکار قدیمی‌ها وقتی احراز هویت روشن می‌شود)
+  await kv.sadd('users', String(userId)).catch(() => {});
+  // دروازه‌ی احراز هویت (وقتی روشن است): ادمین و تأییدشده‌ها رد می‌شوند، بقیه وارد فرم/انتظار
+  if (await authGateMessage(msg, chatId, userId, text)) return;
+
   if (text === '/start') {
     const mode = await getMode(userId);
     await sendMessage(chatId, `سلام! 👋\n\n${HELP}`, await menuKeyboard(mode, userId));
@@ -392,6 +575,11 @@ async function handleMessage(msg) {
   if (text === '💬 ارسال نظر و پیشنهاد' || text === '/feedback') { await promptFeedback(chatId, userId); return; }
   if (text === '📥 نظرات کاربران') {
     if (await isAdmin(userId)) await showInbox(chatId);
+    else await sendMessage(chatId, 'این بخش فقط برای ادمین ربات است.');
+    return;
+  }
+  if (text === '🔐 احراز هویت') {
+    if (await isAdmin(userId)) await showAuthPanel(chatId);
     else await sendMessage(chatId, 'این بخش فقط برای ادمین ربات است.');
     return;
   }
@@ -468,6 +656,48 @@ async function handleCallback(cb) {
   await answerCallbackQuery(cb.id);
   if (!chatId) return;
 
+  // دروازه‌ی احراز هویت برای دکمه‌ها (ادمین مستثنی؛ دکمه‌های خود فرم مجازند)
+  if (!(await isAdmin(userId)) && (await authEnabled())) {
+    const reg = await getReg(userId);
+    const inFlow = data === 'reg:confirm' || data === 'reg:edit';
+    if (reg?.status !== 'approved' && !inFlow) {
+      await sendMessage(chatId, reg?.status === 'pending'
+        ? '⏳ درخواست ثبت‌نامت در انتظار تأیید ادمینه.'
+        : '🔐 برای استفاده از ربات اول باید ثبت‌نام کنی؛ یه پیام بفرست تا فرم رو شروع کنیم.');
+      return;
+    }
+  }
+  if (data === 'reg:edit') {
+    await kv.setJSON(pendingKey(userId), { reg: { step: 'first', data: {} } }, 30 * 60);
+    await sendMessage(chatId, '✏️ از اول پر می‌کنیم:\n\n۱️⃣ نامت چیه؟');
+    return;
+  }
+  if (data === 'reg:confirm') { await confirmRegistration(chatId, userId, cb.from); return; }
+  if (data === 'authtoggle') {
+    if (!(await isAdmin(userId))) { await sendMessage(chatId, 'این بخش فقط برای ادمین ربات است.'); return; }
+    const now = !(await authEnabled());
+    await setAuthEnabled(now);
+    let extra = '';
+    if (now) {
+      const g = await grandfatherExistingUsers();
+      extra = g ? `\n👥 ${g} کاربر قدیمی خودکار تأیید شدن.` : '';
+    }
+    await sendMessage(chatId, now
+      ? `✅ احراز هویت روشن شد؛ از حالا کاربرای تازه باید ثبت‌نام کنن و منتظر تأییدت بمونن.${extra}`
+      : '⚪ احراز هویت خاموش شد؛ حالا همه می‌تونن آزادانه از ربات استفاده کنن.');
+    await showAuthPanel(chatId);
+    return;
+  }
+  if (data === 'reglist') {
+    if (!(await isAdmin(userId))) { await sendMessage(chatId, 'این بخش فقط برای ادمین ربات است.'); return; }
+    await showPendingRegs(chatId);
+    return;
+  }
+  if (data.startsWith('regok:') || data.startsWith('regno:')) {
+    if (!(await isAdmin(userId))) { await sendMessage(chatId, 'این بخش فقط برای ادمین ربات است.'); return; }
+    await decideRegistration(chatId, data.slice(6), data.startsWith('regok:'));
+    return;
+  }
   if (data === 'tts' || data.startsWith('tts:')) { await handleTts(chatId, userId, data.slice(4), false); return; }
   if (data === 'ttss' || data.startsWith('ttss:')) { await handleTts(chatId, userId, data.slice(5), true); return; }
   if (data === 'cron:review') { await startReview(chatId, userId); return; }
