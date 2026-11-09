@@ -44,6 +44,16 @@ const HELP = `🇩🇪 دیکشنری آلمانی ⇄ فارسی
 
 // ----- حالت زبان هر کاربر: 'de' = آلمانی→فارسی | 'fa' = فارسی→آلمانی -----
 const modeKey = (userId) => `mode:${userId}`;
+// دکمه‌ی بازگشت به حالت اولیه (دیکشنری آلمانی → فارسی) زیر جواب‌ها
+const homeRow = () => [btn('🏠 بازگشت به حالت اولیه', 'home')];
+
+async function handleHome(chatId, userId) {
+  await setMode(userId, 'de');
+  await sendMessage(chatId,
+    '🏠 به حالت اولیه برگشتی: دیکشنری آلمانی → فارسی.\nحالا کلمه‌ی آلمانی بفرست تا معنی فارسی‌اش رو بیارم.',
+    await menuKeyboard('de', userId));
+}
+
 const getMode = async (userId) => (await kv.getJSON(modeKey(userId)).catch(() => null)) || 'de';
 const setMode = (userId, m) => kv.setJSON(modeKey(userId), m);
 
@@ -151,7 +161,7 @@ async function startReview(chatId, userId) {
   await sendMessage(
     chatId,
     `🔁 مرور (${due.length} کلمه باقی مانده)\n\nاین کلمه را به یاد می‌آوری؟\n\n🇩🇪 ${card.entry.article ? card.entry.article + ' ' : ''}${card.word}\nخانه‌ی ${card.box} از ${MAX_BOX}`,
-    inlineKeyboard([[btn('👀 نمایش معنی', `rev:show:${card.id}`)]]),
+    inlineKeyboard([[btn('👀 نمایش معنی', `rev:show:${card.id}`)], homeRow()]),
   );
 }
 
@@ -473,16 +483,19 @@ async function handleTextTranslation(chatId, text) {
   }
   const header = from === 'de' ? '📝 ترجمه 🇩🇪 → 🇮🇷' : '📝 ترجمه 🇮🇷 → 🇩🇪';
   const body = `${header}\n\n${r.text}`;
-  // پیام‌های خیلی بلند در چند بخش (سقف امن پیام بله)
-  for (let i = 0; i < body.length; i += 3500) {
-    await sendMessage(chatId, body.slice(i, i + 3500));
+  // پیام‌های خیلی بلند در چند بخش (سقف امن پیام بله)؛ دکمه‌ی خانه زیر بخش آخر می‌آید
+  const chunks = [];
+  for (let i = 0; i < body.length; i += 3500) chunks.push(body.slice(i, i + 3500));
+  for (let i = 0; i < chunks.length; i++) {
+    await sendMessage(chatId, chunks[i],
+      i === chunks.length - 1 ? inlineKeyboard([homeRow()]) : undefined);
   }
 }
 
 async function handleGermanLookup(chatId, userId, text) {
   const entry = await lookupGerman(text);
   if (!entry.found) {
-    await sendMessage(chatId, formatEntry(entry));
+    await sendMessage(chatId, formatEntry(entry), inlineKeyboard([homeRow()]));
     return;
   }
   // بازبینی AI قبل از ارسال (خواسته‌ی کاربر): تصویر و متن بررسی می‌شوند؛
@@ -496,17 +509,20 @@ async function handleGermanLookup(chatId, userId, text) {
   }
   await kv.setJSON(lastKey(userId), entry);
   // یک پیام واحد: عکس + متن کامل در کپشن + دکمه‌ی لایتنر و دکمه‌ی تلفظ (پخش داخل چت)
-  const keyboard = inlineKeyboard([[
-    btn('📦 افزودن به لایتنر', 'leitner:add'),
-    btn('🔊 تلفظ', ttsData('tts:', speakOf(entry))),
-  ]]);
+  const keyboard = inlineKeyboard([
+    [
+      btn('📦 افزودن به لایتنر', 'leitner:add'),
+      btn('🔊 تلفظ', ttsData('tts:', speakOf(entry))),
+    ],
+    homeRow(),
+  ]);
   await sendEntryMessage(chatId, entry, formatEntry(entry), keyboard, img);
 }
 
 async function handlePersianLookup(chatId, userId, text) {
   const result = await lookupPersian(text);
   if (!result.found) {
-    await sendMessage(chatId, formatPersianResult(result));
+    await sendMessage(chatId, formatPersianResult(result), inlineKeyboard([homeRow()]));
     return;
   }
   // تصویر + بازبینی AI قبل از ساخت متن، تا اصلاح‌ها در متن هم دیده شوند
@@ -543,6 +559,7 @@ async function handlePersianLookup(chatId, userId, text) {
       btn(`📦 ${eq.de}`, `faadd:${i}`),
     ];
   });
+  rows.push(homeRow());
   const keyboard = inlineKeyboard(rows);
 
   // تصویرِ بازبینی‌شده (متن کامل همیشه می‌رسد)
@@ -739,6 +756,7 @@ async function handleCallback(cb) {
     await sendMessage(chatId, `🚫 دسترسی کاربر ${reg.firstName ? `«${reg.firstName} ${reg.lastName}»` : targetId} قطع شد.`);
     return;
   }
+  if (data === 'home') { await handleHome(chatId, userId); return; }
   if (data === 'tts' || data.startsWith('tts:')) { await handleTts(chatId, userId, data.slice(4), false); return; }
   if (data === 'ttss' || data.startsWith('ttss:')) { await handleTts(chatId, userId, data.slice(5), true); return; }
   if (data === 'cron:review') { await startReview(chatId, userId); return; }
@@ -785,11 +803,14 @@ async function handleCallback(cb) {
     await sendMessage(
       chatId,
       formatEntry(card.entry),
-      inlineKeyboard([[
-        btn('✅ بلدم', `rev:know:${card.id}`),
-        btn('❌ بلد نیستم', `rev:dunno:${card.id}`),
-        btn('🗑 حذف', `rev:del:${card.id}`),
-      ]]),
+      inlineKeyboard([
+        [
+          btn('✅ بلدم', `rev:know:${card.id}`),
+          btn('❌ بلد نیستم', `rev:dunno:${card.id}`),
+          btn('🗑 حذف', `rev:del:${card.id}`),
+        ],
+        homeRow(),
+      ]),
     );
     return;
   }
