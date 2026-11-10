@@ -118,6 +118,7 @@ const slimCard = (c) => ({
     english: c.entry.english || null,
     imageUrl: c.entry.image || null,
     speak: `${c.entry.article ? c.entry.article + ' ' : ''}${c.entry.word}`,
+    example: (c.entry.examples && c.entry.examples[0]) || null,
   },
 });
 
