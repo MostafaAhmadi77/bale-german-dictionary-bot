@@ -1,72 +1,100 @@
-# 🇩🇪 ربات بله — دیکشنری آلمانی به فارسی + جعبه لایتنر
+# 33Bayan — Bale Bot 🇩🇪
 
-ربات عمومی پیام‌رسان **بله**: کاربر کلمه‌ی آلمانی می‌فرستد و می‌گیرد:
+A public bot for the **Bale** messenger: a German ⇄ Persian dictionary with a built-in **Leitner box** for spaced-repetition vocabulary review.
 
-- **آرتیکل** (`der / die / das`) و **حالت جمع**
-- **توضیح کلمه به زبان آلمانی**
-- **معنی فارسی**
+Send a German word and get back:
 
-و می‌تواند هر کلمه را به **جعبه‌ی لایتنر** خودش اضافه کند، انتخاب کند هر چند روز یک‌بار مرور شود، و ربات سر وقت برای مرور پیام می‌دهد.
+- **Article** (`der / die / das`) and **plural form**
+- **German definitions**, usage examples and collocations (enriched with DWDS)
+- **Persian meaning**, synonyms and antonyms
+- A **photo** for concrete words, and **audio pronunciation** (normal and slow)
 
-> نمونه خروجی برای `Haus`:
+Every word can be saved to your personal Leitner box, and the bot reminds you when reviews are due. Persian words work in reverse, too: send a Persian word and get its German equivalents. Full sentences are translated as text.
+
+> Example output for `Haus`:
 > ```
 > 🇩🇪 das Haus
 > 🔊 /haʊ̯s/
-> 🔤 جمع: die Häuser
+> 🔤 Plural: die Häuser
 >
-> 📖 توضیح به آلمانی:
+> 📖 German definition:
 > 1. zu einem bestimmten Zweck erbautes Gebäude
 > 2. zum Wohnen dienendes und genutztes Gebäude
 >
-> 🇮🇷 معنی فارسی: خانه
+> 🇮🇷 Persian meaning: خانه
 > ```
 
-## معماری
+**Live bot:** [@32bayanbot](https://ble.ir/32bayanbot) · **Deployment:** https://bale-german-dictionary-bot.vercel.app
 
-| بخش | انتخاب | چرا |
+This backend also powers the **33Bayan mobile app** — see [api/app.js](#mobile-app-api) below and the app repo: https://github.com/MostafaAhmadi77/33Bayan
+
+## Features
+
+- **Bidirectional dictionary** — German → Persian entries from de.wiktionary.org, enriched with examples, collocations, synonyms and antonyms from DWDS; Persian → German reverse lookup
+- **Text translation** — sentences (4+ words are auto-detected) are translated with automatic direction detection. Engine chain: DeepL (when a key is configured) → Google Translate (GTX) → MyMemory, with results cached for 30 days and a 2,000-character cap per message
+- **Images** — real photos resolved in order: Wikimedia Commons → Openverse → Pixabay (when a key is configured), with AI-generated images as a last resort for nouns
+- **AI review** — every entry and image is checked by Google Gemini before it is sent; the check fails open, so a lookup never breaks if the AI is unavailable
+- **Pronunciation** — in-chat audio generated with Google TTS, with a slow-playback (0.3×) option
+- **Leitner box** — spaced repetition with a daily review reminder (Vercel Cron, 08:00 Tehran time)
+- **Feedback & admin inbox** — users can send feedback from inside the bot; the admin replies from an in-bot inbox
+- **Optional registration gate** — when enabled by the admin, new users fill in a short form and are approved or rejected by the admin before they can use the bot (off by default)
+- **Home button** — every answer carries a button that resets the session to the main menu
+
+## Architecture
+
+| Part | Choice | Why |
 |---|---|---|
-| میزبانی | **Vercel Serverless** (`api/webhook.js`) | رایگان، بدون سرور روشن دائمی، اتصال مستقیم از گیت‌هاب |
-| API بله | `https://tapi.bale.ai/bot<TOKEN>/…` | هم‌شکل تلگرام: `sendMessage`، دکمه شیشه‌ای، `callback_query` |
-| منبع دیکشنری | **de.wiktionary.org** (بدون کلید) | آرتیکل/جمع/توضیح آلمانی از خود مدخل آلمانی |
-| معنی فارسی | **MyMemory** `de→fa` (بدون کلید) | با fallback زنجیره‌ای `de→en→fa` |
-| دیتابیس لایتنر | **Upstash Redis** (REST، رایگان) | توابع ورسل حافظه‌ی دائمی ندارند؛ لایتنر باید بماند |
-| مرور خودکار | **Vercel Cron** روزانه ۰۸:۰۰ تهران | `api/cron/review.js` — در `vercel.json` |
+| Hosting | **Vercel Serverless** (`api/webhook.js`) | Free, no always-on server, deploys directly from GitHub |
+| Bale API | `https://tapi.bale.ai/bot<TOKEN>/…` | Telegram-style API: `sendMessage`, inline buttons, `callback_query` |
+| Dictionary source | **de.wiktionary.org** (no key required) | Article, plural and German definitions come from the German entry itself |
+| Enrichment | **DWDS** (dwds.de) | Examples, collocations, synonyms and antonyms |
+| Persian meaning | Wiktionary translations, with a **MyMemory / Google / DeepL** fallback chain | Best available source first, graceful fallback after that |
+| Leitner storage | **Upstash Redis** (REST, free tier) | Vercel functions are stateless; Leitner cards must persist |
+| Scheduled reviews | **Vercel Cron**, daily 08:00 Tehran | `api/cron/review.js`, configured in `vercel.json` |
+| AI review | **Google Gemini** (`gemini-flash-lite-latest`) | Fast pre-send check of entries and images |
 
-## منطق لایتنر
+## How the Leitner box works
 
-- هنگام افزودن، کاربر بازه را انتخاب می‌کند: **هر روز / هر ۳ روز / هر هفته**.
-- کارت از **خانه‌ی ۱** شروع می‌کند؛ اولین مرور بعد از همان بازه است.
-- «✅ بلدم» ← یک خانه بالاتر و فاصله دو برابر می‌شود (بازه × ۲^(خانه−۱)، سقف ۶۰ روز).
-- «❌ بلد نیستم» ← برگشت به خانه‌ی ۱.
-- دستورها: `/mywords` فهرست کارت‌ها، `/review` شروع مرور رسیده‌ها، `/due` شمارش امروز.
+- When adding a word, the user picks a review interval: **every day / every 3 days / every week**.
+- A card starts in **box 1**; the first review is due after the chosen interval.
+- **“✅ I know it”** moves the card one box up and doubles the interval (base × 2^(box−1), capped at 60 days).
+- **“❌ I don't know it”** sends the card back to box 1.
+- Commands: `/mywords` lists your cards, `/review` starts a review of due cards, `/due` shows today's count.
 
-## راه‌اندازی قدم‌به‌قدم
+## Setup
 
-### ۱) ساخت ربات در بله
-در بله به **بات‌فادر (@BotFather)** پیام بدهید، ربات جدید بسازید و **توکن** را نگه دارید. توکن را در چت/کد ننویسید؛ فقط در Environment Variables ورسل وارد می‌شود.
+### 1) Create the bot in Bale
 
-### ۲) دیتابیس Upstash (رایگان)
-در [console.upstash.com](https://console.upstash.com) یک Redis بسازید و از بخش **REST API** دو مقدار `UPSTASH_REDIS_REST_URL` و `UPSTASH_REDIS_REST_TOKEN` را بردارید.
+Message **BotFather (@BotFather)** in Bale, create a new bot and keep the **token**. Never put the token in code or chat — it only goes into Vercel Environment Variables.
 
-### ۳) گیت‌هاب → ورسل
-1. این پوشه را در یک ریپوی گیت‌هاب پوش کنید (دستورهای پایین).
-2. در [vercel.com](https://vercel.com) → **Add New → Project** → همان ریپو را Import کنید (تنظیم خاصی لازم نیست؛ فریم‌ورک: Other).
-3. در بخش **Environment Variables** پروژه‌ی ورسل این‌ها را بگذارید (از `.env.example`):
+### 2) Create the Upstash database (free)
+
+At [console.upstash.com](https://console.upstash.com), create a Redis database and copy `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` from the **REST API** section.
+
+### 3) GitHub → Vercel
+
+1. Push this folder to a GitHub repository.
+2. In [vercel.com](https://vercel.com) choose **Add New → Project** and import that repository (no special settings; framework: Other).
+3. Add these **Environment Variables** (see `.env.example`):
    - `BALE_BOT_TOKEN`
    - `UPSTASH_REDIS_REST_URL`
    - `UPSTASH_REDIS_REST_TOKEN`
-   - `SETUP_SECRET` (یک رمز دلخواه)
-   - `CRON_SECRET` (یک رشته‌ی تصادفی)
-4. **Deploy** کنید.
+   - `SETUP_SECRET` (any password you choose)
+   - `CRON_SECRET` (a random string)
+   - Optional: `GEMINI_API_KEY` (AI review), `DEEPL_API_KEY` (better text translation), `PIXABAY_API_KEY` (more photos)
+4. Click **Deploy**.
 
-### ۴) تنظیم وبهوک (یک بار)
-مرورگر را باز کنید:
+### 4) Set the webhook (one time)
+
+Open in a browser:
+
 ```
 https://<your-app>.vercel.app/api/setup?secret=<SETUP_SECRET>
 ```
-باید `bot` و `"webhook":{"ok":true}` ببینید. حالا در بله به رباتتان پیام بدهید. 🎉
 
-از این به بعد هر **push به گیت‌هاب = دیپلوی خودکار در ورسل**.
+You should see the `bot` info and `"webhook":{"ok":true}`. Now message your bot in Bale. 🎉
+
+From here on, every **push to GitHub deploys automatically to Vercel**.
 
 ```bash
 git init
@@ -77,31 +105,50 @@ git remote add origin https://github.com/<YOUR-USERNAME>/<REPO>.git
 git push -u origin main
 ```
 
-## تست محلی
+## Mobile app API
+
+`api/app.js` exposes the same engine as JSON for the 33Bayan mobile app (React Native / Expo). App users are identified by a random on-device ID, and their Leitner cards are stored separately under an `app:` prefix.
+
+- `GET /api/app?action=lookup&dir=de&q=Hund` — full German entry
+- `GET /api/app?action=lookup&dir=fa&q=سگ` — German equivalents for a Persian word
+- `POST /api/app?action=translate` — text translation (direction detected automatically)
+- `leitner.list` / `leitner.due` / `leitner.add` / `leitner.review` / `leitner.remove` — the app user's Leitner box
+- Pronunciation reuses the existing endpoint: `/api/tts?t=der+Hund&raw=1`
+
+## Local testing
 
 ```bash
-npm test   # جست‌وجوی واقعی Haus/Wasser/gehen + چرخه‌ی کامل لایتنر (بدون توکن بله)
+npm test   # live lookups for Haus/Wasser/gehen + a full Leitner cycle (no Bale token needed)
 ```
 
-## ساختار پروژه
+## Project structure
 
 ```
 api/
-  webhook.js       # ورودی آپدیت‌های بله: جست‌وجو، دستورها، دکمه‌ها
-  cron/review.js   # یادآوری روزانه‌ی مرور (Vercel Cron)
-  setup.js         # تنظیم وبهوک بعد از دیپلوی
-  health.js        # بررسی سلامت
+  webhook.js       # Bale update entry point: lookups, commands, buttons
+  app.js           # JSON API for the 33Bayan mobile app
+  tts.js           # pronunciation audio endpoint
+  cron/review.js   # daily review reminders (Vercel Cron)
+  setup.js         # one-time webhook setup after deploy
+  health.js        # health check
 lib/
-  bale.js          # کلاینت API بله
-  dictionary.js    # ویکی‌واژه (آرتیکل/جمع/توضیح) + معنی فارسی + کش ۳۰روزه
-  leitner.js       # منطق جعبه‌ی لایتنر
-  store.js         # Upstash Redis (REST) + fallback حافظه برای تست
+  bale.js          # Bale API client
+  dictionary.js    # Wiktionary entries + Persian meaning + 30-day cache
+  dwds.js          # DWDS examples, collocations, synonyms/antonyms
+  translate.js     # text translation (DeepL → Google GTX → MyMemory)
+  media.js         # photo resolution (Commons → Openverse → Pixabay → generated)
+  ai-check.js      # Gemini review of entries and images before sending
+  leitner.js       # Leitner box logic
+  auth.js          # optional registration / approval gate
+  feedback.js      # user feedback + admin inbox
+  store.js         # Upstash Redis (REST) + in-memory fallback for local tests
 scripts/test-local.mjs
-vercel.json        # کرون روزانه
+vercel.json        # daily cron + function settings
 ```
 
-## محدودیت‌های صادقانه
+## Honest limitations
 
-- MyMemory رایگان سقف روزانه دارد (حدود ۱۰۰۰ کلمه/روز ناشناس)؛ کش ۳۰روزه‌ی دیکشنری فشار را خیلی کم می‌کند. برای ترافیک بالا بعداً می‌شود کلید DeepL/ترجمه اضافه کرد — جای آن در `lib/dictionary.js` (`translateToPersian`) مشخص است.
-- همه‌ی کلمات آلمانی در ویکی‌واژه مدخل کامل ندارند؛ کلمه‌ی پیدا‌نشده با پیام روشن جواب داده می‌شود.
-- افعال و صفت‌ها آرتیکل/جمع ندارند؛ به‌جای آن «نوع کلمه» نمایش داده می‌شود.
+- The free MyMemory tier has a daily quota (roughly 1,000 words/day anonymously); the 30-day dictionary cache keeps the pressure low. For heavy traffic, add a DeepL key — the integration point is in `lib/translate.js`.
+- Not every German word has a complete Wiktionary entry; unknown words get a clear “not found” reply.
+- Verbs and adjectives have no article or plural; their word type is shown instead.
+- The Bale API cannot change the bot's name or profile photo — those are set manually through BotFather.
