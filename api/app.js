@@ -4,7 +4,9 @@
 // با پیشوند app: ذخیره می‌شوند.
 //
 // GET  /api/app?action=lookup&q=Hund&dir=de        → مدخل آلمانی (JSON)
+// GET  /api/app?action=lookup&q=Hund&dir=de&fast=1  → همان، بدون بازبینی AI و بدون واکشی عکس
 // GET  /api/app?action=lookup&q=سگ&dir=fa          → معادل‌های آلمانی
+// GET  /api/app?action=examples&word=Hund&level=B1&count=3 → مثال‌های سطح‌بندی‌شده با ترجمه‌ی فارسی
 // POST /api/app?action=translate  { text }         → ترجمه‌ی متن (جهت خودکار)
 // GET  /api/app?action=leitner.list&uid=...        → همه‌ی کارت‌ها
 // GET  /api/app?action=leitner.due&uid=...         → کارت‌های سررسید
@@ -21,6 +23,7 @@ import {
   downloadImageBuffer, generateImageBuffer,
 } from '../lib/media.js';
 import { applyReview } from '../lib/ai-check.js';
+import { generateLevelExamples } from '../lib/level-examples.js';
 import { kv } from '../lib/store.js';
 
 function send(res, code, obj) {
@@ -63,22 +66,31 @@ async function resolveImage(entry) {
   return null;
 }
 
-/** نسخه‌ی لاغر مدخل برای اپ + تصویر + بازبینی AI (همان رفتار ربات) */
-async function buildPayload(entry, withReview = true) {
-  let image = await resolveImage(entry).catch(() => null);
-  let imageUrl = image?.url || null;
-  if (withReview && image && !entry.aiReviewed) {
-    const buf = image.kind === 'generated'
-      ? await generateImageBuffer(entry.word, entry.english, wordTypeOf(entry)).catch(() => null)
-      : await downloadImageBuffer(image.url).catch(() => null);
-    if (buf) {
-      const img = { buf, kind: image.kind, url: image.url };
-      const out = await applyReview(entry, img,
-        () => generateImageBuffer(entry.word, entry.english, wordTypeOf(entry))).catch(() => img);
-      if (out === null) imageUrl = null;
-      else if (out !== img) imageUrl = (!wordTypeOf(entry) || wordTypeOf(entry) === 'Substantiv') ? generatedUrlFor(entry) : null;
-      if (entry.aiReviewed) {
-        await kv.setJSON(`dict:v7:${entry.word.toLowerCase()}`, entry).catch(() => {});
+/** نسخه‌ی لاغر مدخل برای اپ + تصویر + بازبینی AI (همان رفتار ربات)
+ * fast=true: بدون بازبینی AI و بدون واکشی عکس از کامنز/Openverse/Pixabay —
+ * تصویر = عکس خود مدخل، وگرنه URL ساخته‌شده برای اسم‌ها، وگرنه null. بقیه‌ی فیلدها یکی‌اند. */
+async function buildPayload(entry, withReview = true, fast = false) {
+  let imageUrl = null;
+  if (fast) {
+    imageUrl = entry.image
+      ? entry.image
+      : (!wordTypeOf(entry) || wordTypeOf(entry) === 'Substantiv') ? generatedUrlFor(entry) : null;
+  } else {
+    let image = await resolveImage(entry).catch(() => null);
+    imageUrl = image?.url || null;
+    if (withReview && image && !entry.aiReviewed) {
+      const buf = image.kind === 'generated'
+        ? await generateImageBuffer(entry.word, entry.english, wordTypeOf(entry)).catch(() => null)
+        : await downloadImageBuffer(image.url).catch(() => null);
+      if (buf) {
+        const img = { buf, kind: image.kind, url: image.url };
+        const out = await applyReview(entry, img,
+          () => generateImageBuffer(entry.word, entry.english, wordTypeOf(entry))).catch(() => img);
+        if (out === null) imageUrl = null;
+        else if (out !== img) imageUrl = (!wordTypeOf(entry) || wordTypeOf(entry) === 'Substantiv') ? generatedUrlFor(entry) : null;
+        if (entry.aiReviewed) {
+          await kv.setJSON(`dict:v8:${entry.word.toLowerCase()}`, entry).catch(() => {});
+        }
       }
     }
   }
@@ -137,6 +149,9 @@ export default async function handler(req, res) {
     if (action === 'lookup') {
       const q = String(req.query?.q || '').trim();
       if (!q) { send(res, 400, { ok: false, error: 'q required' }); return; }
+      // fast=1: جست‌وجوی فوری — بدون بازبینی AI و بدون واکشی عکس (معنی فورا می‌رسد؛
+      // تصویرِ کامل در صورت نیاز با فراخوان عادیِ بعدی می‌آید)
+      const fast = req.query?.fast === '1';
       if (req.query?.dir === 'fa') {
         const result = await lookupPersian(q);
         if (!result.found) { send(res, 200, { ok: true, found: false, word: result.word, equivalents: [] }); return; }
@@ -144,7 +159,7 @@ export default async function handler(req, res) {
         for (const eq of result.equivalents) {
           equivalents.push({
             de: eq.de,
-            entry: eq.entry ? await buildPayload(eq.entry, eq === result.equivalents[0]) : null,
+            entry: eq.entry ? await buildPayload(eq.entry, eq === result.equivalents[0], fast) : null,
           });
         }
         send(res, 200, { ok: true, found: true, word: result.word, equivalents });
@@ -152,7 +167,23 @@ export default async function handler(req, res) {
       }
       const entry = await lookupGerman(q);
       if (!entry.found) { send(res, 200, { ok: true, found: false, word: q }); return; }
-      send(res, 200, { ok: true, found: true, entry: await buildPayload(entry) });
+      send(res, 200, { ok: true, found: true, entry: await buildPayload(entry, true, fast) });
+      return;
+    }
+
+    if (action === 'examples') {
+      const word = String(req.query?.word || '').trim();
+      if (!word) { send(res, 400, { ok: false, error: 'word required' }); return; }
+      const level = String(req.query?.level || 'B1');
+      const count = Number(req.query?.count || 3);
+      // حسِ کلمه برای مدل: معنی فارسی/انگلیسیِ مدخل (اگر کش شده باشد سریع است؛
+      // نبودنش چیزی را خراب نمی‌کند — مدل فقط با خودِ کلمه کار می‌کند)
+      let gloss = '';
+      try {
+        const entry = await lookupGerman(word);
+        if (entry?.found) gloss = [entry.persian, entry.english].filter(Boolean).join(' / ');
+      } catch { /* gloss خالی می‌ماند */ }
+      send(res, 200, await generateLevelExamples(word, gloss, level, count));
       return;
     }
 
