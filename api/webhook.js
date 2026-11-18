@@ -505,7 +505,7 @@ async function handleGermanLookup(chatId, userId, text) {
     () => generateImageBuffer(entry.word, entry.english, entry.wordType));
   if (entry.aiReviewed) {
     // نسخه‌ی بازبینی‌شده در کش دیکشنری هم ذخیره می‌شود تا برای همه همان بیاید
-    await kv.setJSON(`dict:v8:${entry.word.toLowerCase()}`, entry).catch(() => {});
+    await kv.setJSON(`dict:v9:${entry.word.toLowerCase()}`, entry).catch(() => {});
   }
   await kv.setJSON(lastKey(userId), entry);
   // یک پیام واحد: عکس + متن کامل در کپشن + دکمه‌ی لایتنر و دکمه‌ی تلفظ (پخش داخل چت)

@@ -89,7 +89,7 @@ async function buildPayload(entry, withReview = true, fast = false) {
         if (out === null) imageUrl = null;
         else if (out !== img) imageUrl = (!wordTypeOf(entry) || wordTypeOf(entry) === 'Substantiv') ? generatedUrlFor(entry) : null;
         if (entry.aiReviewed) {
-          await kv.setJSON(`dict:v8:${entry.word.toLowerCase()}`, entry).catch(() => {});
+          await kv.setJSON(`dict:v9:${entry.word.toLowerCase()}`, entry).catch(() => {});
         }
       }
     }
