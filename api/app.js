@@ -89,7 +89,7 @@ async function buildPayload(entry, withReview = true, fast = false) {
         if (out === null) imageUrl = null;
         else if (out !== img) imageUrl = (!wordTypeOf(entry) || wordTypeOf(entry) === 'Substantiv') ? generatedUrlFor(entry) : null;
         if (entry.aiReviewed) {
-          await kv.setJSON(`dict:v9:${entry.word.toLowerCase()}`, entry).catch(() => {});
+          await kv.setJSON(`dict:v10:${entry.word.toLowerCase()}`, entry).catch(() => {});
         }
       }
     }
@@ -100,6 +100,9 @@ async function buildPayload(entry, withReview = true, fast = false) {
     article: entry.article || null,
     plural: entry.plural || null,
     pluralFull: pluralText(entry),
+    nounForm: entry.nounForm
+      ? { word: entry.nounForm.word, article: entry.nounForm.article || null, persian: entry.nounForm.persian || null }
+      : null,
     persian: entry.persian || null,
     english: entry.english || null,
     ipa: entry.ipa || null,
@@ -153,7 +156,7 @@ export default async function handler(req, res) {
       // تصویرِ کامل در صورت نیاز با فراخوان عادیِ بعدی می‌آید)
       const fast = req.query?.fast === '1';
       if (req.query?.dir === 'fa') {
-        const result = await lookupPersian(q);
+        const result = await lookupPersian(q, { fast });
         if (!result.found) { send(res, 200, { ok: true, found: false, word: result.word, equivalents: [] }); return; }
         const equivalents = [];
         for (const eq of result.equivalents) {
@@ -165,7 +168,7 @@ export default async function handler(req, res) {
         send(res, 200, { ok: true, found: true, word: result.word, equivalents });
         return;
       }
-      const entry = await lookupGerman(q);
+      const entry = await lookupGerman(q, { fast });
       if (!entry.found) { send(res, 200, { ok: true, found: false, word: q }); return; }
       send(res, 200, { ok: true, found: true, entry: await buildPayload(entry, true, fast) });
       return;
