@@ -7,6 +7,7 @@
 // GET  /api/app?action=lookup&q=Hund&dir=de&fast=1  → همان، بدون بازبینی AI و بدون واکشی عکس
 // GET  /api/app?action=lookup&q=سگ&dir=fa          → معادل‌های آلمانی
 // GET  /api/app?action=examples&word=Hund&level=B1&count=3 → مثال‌های سطح‌بندی‌شده با ترجمه‌ی فارسی
+// GET  /api/app?action=conjugation&word=gehen      → صرف کامل فعل (از Flexion:gehen در ویکی‌واژه)
 // POST /api/app?action=translate  { text }         → ترجمه‌ی متن (جهت خودکار)
 // GET  /api/app?action=leitner.list&uid=...        → همه‌ی کارت‌ها
 // GET  /api/app?action=leitner.due&uid=...         → کارت‌های سررسید
@@ -16,6 +17,7 @@
 // تلفظ از endpoint موجود استفاده می‌کند: /api/tts?t=der+Hund&raw=1
 
 import { lookupGerman, lookupPersian, pluralText } from '../lib/dictionary.js';
+import { getConjugation } from '../lib/conjugation.js';
 import { translateText, detectDirection } from '../lib/translate.js';
 import { addCard, listCards, dueCards, answerCard, removeCard } from '../lib/leitner.js';
 import {
@@ -187,6 +189,14 @@ export default async function handler(req, res) {
         if (entry?.found) gloss = [entry.persian, entry.english].filter(Boolean).join(' / ');
       } catch { /* gloss خالی می‌ماند */ }
       send(res, 200, await generateLevelExamples(word, gloss, level, count));
+      return;
+    }
+
+    if (action === 'conjugation') {
+      const word = String(req.query?.word || '').trim();
+      if (!word) { send(res, 400, { ok: false, error: 'word required' }); return; }
+      const conjugation = await getConjugation(word);
+      send(res, 200, conjugation.ok ? { ok: true, conjugation } : { ok: false, conjugation: null });
       return;
     }
 
