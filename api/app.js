@@ -26,6 +26,7 @@ import {
 } from '../lib/media.js';
 import { applyReview } from '../lib/ai-check.js';
 import { generateLevelExamples } from '../lib/level-examples.js';
+import { getTatoebaExamples } from '../lib/tatoeba.js';
 import { kv } from '../lib/store.js';
 
 function send(res, code, obj) {
@@ -141,6 +142,7 @@ async function buildPayload(entry, withReview = true, fast = false) {
     synonyms: entry.synonyms || [],
     antonyms: entry.antonyms || [],
     dwdsExamples: entry.dwds?.examples || [],
+    tatoebaExamples: getTatoebaExamples(entry.word),
     collocations: entry.dwds?.collocations || [],
     imageUrl,
     speak: `${entry.article ? entry.article + ' ' : ''}${entry.word}`,
