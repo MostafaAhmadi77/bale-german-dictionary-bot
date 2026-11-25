@@ -91,7 +91,7 @@ async function buildPayload(entry, withReview = true, fast = false) {
         if (out === null) imageUrl = null;
         else if (out !== img) imageUrl = (!wordTypeOf(entry) || wordTypeOf(entry) === 'Substantiv') ? generatedUrlFor(entry) : null;
         if (entry.aiReviewed) {
-          await kv.setJSON(`dict:v10:${entry.word.toLowerCase()}`, entry).catch(() => {});
+          await kv.setJSON(`dict:v11:${entry.word}`, entry).catch(() => {});
         }
       }
     }
@@ -103,7 +103,35 @@ async function buildPayload(entry, withReview = true, fast = false) {
     plural: entry.plural || null,
     pluralFull: pluralText(entry),
     nounForm: entry.nounForm
-      ? { word: entry.nounForm.word, article: entry.nounForm.article || null, persian: entry.nounForm.persian || null }
+      ? {
+          word: entry.nounForm.word,
+          article: entry.nounForm.article || null,
+          persian: entry.nounForm.persian || null,
+          definitions: Array.isArray(entry.nounForm.definitions)
+            ? entry.nounForm.definitions.slice(0, 4)
+            : [],
+          examples: Array.isArray(entry.nounForm.examples)
+            ? entry.nounForm.examples.slice(0, 2)
+              .map((ex) => ({ de: typeof ex === 'string' ? ex : (ex?.de || '') }))
+              .filter((ex) => ex.de)
+            : [],
+        }
+      : null,
+    formOf: entry.formOf
+      ? {
+          form: entry.formOf.form || null,
+          base: entry.formOf.base || null,
+          grammar: entry.formOf.grammar || null,
+        }
+      : null,
+    reflexive: Boolean(entry.reflexive),
+    also: entry.also
+      ? {
+          word: entry.also.word || null,
+          type: entry.also.type || entry.also.wordType || null,
+          article: entry.also.article || null,
+          persian: entry.also.persian || null,
+        }
       : null,
     persian: entry.persian || null,
     english: entry.english || null,
